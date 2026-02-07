@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Production Chain Atlas – Songs of Syx</title>
+  <link rel="stylesheet" href="display/style.css">
+
+  <!-- D3.js v7 (UMD, attaches to window.d3) -->
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+
+  <!-- PixiJS v8 import map (WebGL canvas renderer for graph tab) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "pixi.js": "https://cdn.jsdelivr.net/npm/pixi.js@8/dist/pixi.min.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="header-bar" class="ui-panel">
+    <div id="header-title">
+      <h1>Production Chain Atlas</h1>
+      <span class="subtitle">A community tool for Songs of Syx</span>
+    </div>
+    <div id="tab-bar">
+      <button class="tab active" data-tab="graph" title="Alt+1">Graph</button>
+      <button class="tab" data-tab="population" title="Alt+2">Population Needs</button>
+      <button class="tab" data-tab="upkeep" title="Alt+3">Building Upkeep</button>
+      <button class="tab" data-tab="balancing" title="Alt+4">Production Balancing</button>
+    </div>
+    <button id="help-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+  </div>
+
+  <div id="view-graph" class="view active">
+    <div id="breadcrumb-bar"></div>
+
+    <div id="filter-panel" class="ui-panel"></div>
+    <div id="graph-container"></div>
+    <div id="detail-panel" class="ui-panel"></div>
+
+    <div id="legend" class="ui-panel"></div>
+
+    <div id="stats-bar" class="ui-panel"></div>
+  </div>
+
+  <div id="view-population" class="view"></div>
+  <div id="view-upkeep" class="view"></div>
+  <div id="view-balancing" class="view"></div>
+
+  <!--
+    ES Modules require an HTTP server — file:// will block imports due to CORS.
+    Serve with:  npx serve .
+    Then open:   http://localhost:3000
+  -->
+  <script type="module">
+    import { render } from "./display/render.js";
+    import { initTabs } from "./display/tabs.js";
+    render();
+    initTabs();
+  </script>
+</body>
+</html>

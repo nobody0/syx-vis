@@ -1,0 +1,222 @@
+// PixiJS edge drawing utilities: bezier sampling, dashed curves, arrowheads
+
+/**
+ * Compute cubic bezier control points matching layout.js edgePath convention.
+ * @param {number} fromX
+ * @param {number} fromY
+ * @param {number} toX
+ * @param {number} toY
+ * @returns {{cx1: number, cy1: number, cx2: number, cy2: number}}
+ */
+export function bezierControls(fromX, fromY, toX, toY) {
+  const dx = toX - fromX;
+  return {
+    cx1: fromX + dx * 0.4,
+    cy1: fromY,
+    cx2: toX - dx * 0.4,
+    cy2: toY,
+  };
+}
+
+/**
+ * Evaluate cubic bezier at parameter t.
+ * @param {number} fromX
+ * @param {number} fromY
+ * @param {number} toX
+ * @param {number} toY
+ * @param {number} t
+ * @returns {{x: number, y: number}}
+ */
+export function bezierAt(fromX, fromY, toX, toY, t) {
+  const { cx1, cy1, cx2, cy2 } = bezierControls(fromX, fromY, toX, toY);
+  const t1 = 1 - t;
+  return {
+    x: t1 * t1 * t1 * fromX + 3 * t1 * t1 * t * cx1 + 3 * t1 * t * t * cx2 + t * t * t * toX,
+    y: t1 * t1 * t1 * fromY + 3 * t1 * t1 * t * cy1 + 3 * t1 * t * t * cy2 + t * t * t * toY,
+  };
+}
+
+/**
+ * Sample a bezier curve into an array of points.
+ * @param {number} fromX
+ * @param {number} fromY
+ * @param {number} toX
+ * @param {number} toY
+ * @param {number} [segments=80]
+ * @returns {{x: number, y: number}[]}
+ */
+export function sampleBezier(fromX, fromY, toX, toY, segments = 80) {
+  const points = [];
+  for (let i = 0; i <= segments; i++) {
+    points.push(bezierAt(fromX, fromY, toX, toY, i / segments));
+  }
+  return points;
+}
+
+/**
+ * Draw a solid bezier curve using Graphics.bezierCurveTo.
+ * @param {import('pixi.js').Graphics} g
+ * @param {number} fromX
+ * @param {number} fromY
+ * @param {number} toX
+ * @param {number} toY
+ */
+export function drawSolidBezier(g, fromX, fromY, toX, toY) {
+  const { cx1, cy1, cx2, cy2 } = bezierControls(fromX, fromY, toX, toY);
+  g.moveTo(fromX, fromY);
+  g.bezierCurveTo(cx1, cy1, cx2, cy2, toX, toY);
+}
+
+/**
+ * Draw a dashed bezier curve along sampled points.
+ * @param {import('pixi.js').Graphics} g
+ * @param {{x: number, y: number}[]} points - sampled curve points
+ * @param {number[]} pattern - dash/gap lengths, e.g. [6, 3]
+ * @param {number} [offset=0] - dash offset for animation
+ */
+export function drawDashedCurve(g, points, pattern, offset = 0) {
+  if (points.length < 2) return;
+
+  // Compute cumulative arc-length for each point
+  const distances = [0];
+  for (let i = 1; i < points.length; i++) {
+    const dx = points[i].x - points[i - 1].x;
+    const dy = points[i].y - points[i - 1].y;
+    distances.push(distances[i - 1] + Math.sqrt(dx * dx + dy * dy));
+  }
+  const totalLen = distances[distances.length - 1];
+  if (totalLen < 1) return;
+
+  const patternLen = pattern.reduce((a, b) => a + b, 0);
+  if (patternLen <= 0) return;
+
+  // Normalise offset to [0, patternLen)
+  let pos = ((offset % patternLen) + patternLen) % patternLen;
+  let patIdx = 0;
+  let drawing = true;
+  // Fast-forward through pattern to account for offset
+  while (pos > 0) {
+    if (pos < pattern[patIdx]) {
+      break;
+    }
+    pos -= pattern[patIdx];
+    patIdx = (patIdx + 1) % pattern.length;
+    drawing = !drawing;
+  }
+  let remaining = pattern[patIdx] - pos;
+
+  let ptIdx = 0;
+  let curDist = 0;
+
+  while (ptIdx < points.length - 1) {
+    const segEnd = curDist + remaining;
+
+    if (drawing) {
+      g.moveTo(points[ptIdx].x, points[ptIdx].y);
+    }
+
+    // Walk forward along points until we've consumed `remaining` distance
+    while (ptIdx < points.length - 1 && distances[ptIdx + 1] <= segEnd) {
+      ptIdx++;
+      if (drawing) {
+        g.lineTo(points[ptIdx].x, points[ptIdx].y);
+      }
+    }
+
+    // Interpolate to exact segment end if between two points
+    if (ptIdx < points.length - 1 && segEnd < distances[ptIdx + 1]) {
+      const frac = (segEnd - distances[ptIdx]) / (distances[ptIdx + 1] - distances[ptIdx]);
+      const ix = points[ptIdx].x + (points[ptIdx + 1].x - points[ptIdx].x) * frac;
+      const iy = points[ptIdx].y + (points[ptIdx + 1].y - points[ptIdx].y) * frac;
+      if (drawing) {
+        g.lineTo(ix, iy);
+      }
+    }
+
+    curDist = segEnd;
+    patIdx = (patIdx + 1) % pattern.length;
+    drawing = !drawing;
+    remaining = pattern[patIdx];
+  }
+}
+
+/**
+ * Dash patterns for each edge direction type.
+ * @type {Record<string, number[]>}
+ */
+export const DASH_PATTERNS = {
+  construction: [8, 4],
+  upgrade: [4, 4],
+  equipment: [6, 3, 2, 3],
+  ammo: [6, 3, 2, 3],
+  sacrifice: [6, 3, 2, 3],
+  synthetic: [4, 6],
+};
+
+/**
+ * Edge color for each direction type.
+ * Warmer tones for production flow, cooler for infrastructure.
+ * @type {Record<string, number>}
+ */
+export const EDGE_COLORS = {
+  input: 0x5878a0,
+  output: 0x5878a0,
+  construction: 0x4890c8,
+  upgrade: 0x8860c0,
+  equipment: 0xd89840,
+  ammo: 0xd85858,
+  sacrifice: 0xc04888,
+  synthetic: 0x506878,
+  area: 0x5878a0,
+};
+
+/**
+ * Edge alpha for each direction type.
+ * @type {Record<string, number>}
+ */
+export const EDGE_ALPHAS = {
+  input: 0.35,
+  output: 0.35,
+  construction: 0.32,
+  upgrade: 0.38,
+  equipment: 0.35,
+  ammo: 0.35,
+  sacrifice: 0.35,
+  synthetic: 0.18,
+  area: 0.30,
+};
+
+/**
+ * Draw an arrowhead at the end of a curve.
+ * Narrower kite shape for a sleeker look.
+ * @param {import('pixi.js').Graphics} g
+ * @param {{x: number, y: number}[]} points - sampled curve points (uses last 2)
+ * @param {number} color
+ * @param {number} alpha
+ * @param {number} [size=7]
+ */
+export function drawArrowhead(g, points, color, alpha, size = 7) {
+  if (points.length < 2) return;
+  const p1 = points[points.length - 2];
+  const p2 = points[points.length - 1];
+  const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+
+  const tipX = p2.x;
+  const tipY = p2.y;
+  // Narrower spread angle (PI/7 ≈ 25.7° vs PI/6 ≈ 30°)
+  const spread = Math.PI / 7;
+  const baseX1 = tipX - Math.cos(angle - spread) * size;
+  const baseY1 = tipY - Math.sin(angle - spread) * size;
+  const baseX2 = tipX - Math.cos(angle + spread) * size;
+  const baseY2 = tipY - Math.sin(angle + spread) * size;
+  // Indent point for kite shape
+  const indentX = tipX - Math.cos(angle) * (size * 0.55);
+  const indentY = tipY - Math.sin(angle) * (size * 0.55);
+
+  g.moveTo(tipX, tipY);
+  g.lineTo(baseX1, baseY1);
+  g.lineTo(indentX, indentY);
+  g.lineTo(baseX2, baseY2);
+  g.closePath();
+  g.fill({ color, alpha });
+}
