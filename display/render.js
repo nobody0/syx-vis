@@ -84,6 +84,10 @@ let highlightedEdgeIdxs = new Map(); // idx → {color, width}
 let dashOffset = 0;
 let edgeLabelsCreated = false;
 
+// Stats bar counts (for re-rendering on selection change)
+let lastNodeCount = 0;
+let lastEdgeCount = 0;
+
 // ══════════════════════════════════════════════════════════
 // BFS chain highlighting (pure data)
 // ══════════════════════════════════════════════════════════
@@ -591,6 +595,7 @@ function createTooltip() {
     <div class="graph-tooltip-cat"></div>
     <div class="graph-tooltip-desc"></div>
     <div class="graph-tooltip-filter-reason"></div>
+    <div class="graph-tooltip-click-hint"></div>
   `;
   document.body.appendChild(tooltipEl);
 }
@@ -640,6 +645,11 @@ function showTooltip(event, d, filterReason) {
     reasonEl.style.display = "";
   } else {
     reasonEl.style.display = "none";
+  }
+
+  const clickHintEl = tooltipEl.querySelector(".graph-tooltip-click-hint");
+  if (clickHintEl) {
+    clickHintEl.style.display = localStorage.getItem("syx-vis-onboarded") ? "none" : "";
   }
 
   tooltipEl.classList.add("visible");
@@ -940,6 +950,7 @@ async function initRenderer() {
         breadcrumbHistory = [];
         renderBreadcrumbs();
         restoreBaseState();
+        refreshStatsBar();
       }
       bgClickConsumed = false;
     }, 0);
@@ -988,6 +999,7 @@ async function initRenderer() {
       breadcrumbHistory = [];
       renderBreadcrumbs();
       restoreBaseState();
+      refreshStatsBar();
     }
   });
 
@@ -1008,9 +1020,26 @@ async function initRenderer() {
   shortcutOverlay.innerHTML = `
     <div class="shortcut-modal">
       <div class="shortcut-modal-header">
-        <span>Keyboard Shortcuts</span>
+        <span>How to Use</span>
         <button class="shortcut-close">\u00D7</button>
       </div>
+      <div class="help-getting-started">
+        <div class="help-section-label">Getting Started</div>
+        <table class="shortcut-table">
+          <tr>
+            <td style="width:1%;padding-right:12px"><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#5a9eff;box-shadow:0 0 3px rgba(0,0,0,0.4);vertical-align:middle"></span></td>
+            <td><strong style="color:var(--text-primary)">Circle = Resource</strong></td>
+          </tr>
+          <tr>
+            <td><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background:#d88848;box-shadow:0 0 3px rgba(0,0,0,0.4);vertical-align:middle"></span></td>
+            <td><strong style="color:var(--text-primary)">Rectangle = Building</strong></td>
+          </tr>
+          <tr><td></td><td>Click a node to see its details and supply chain</td></tr>
+          <tr><td></td><td>Hover an edge to see recipe rates</td></tr>
+          <tr><td></td><td>Use the filter panel to search or hide categories</td></tr>
+        </table>
+      </div>
+      <div class="help-section-label" style="margin-top:16px">Keyboard Shortcuts</div>
       <table class="shortcut-table">
         <tr><td class="shortcut-key"><kbd>Ctrl+F</kbd></td><td>Search nodes</td></tr>
         <tr><td class="shortcut-key"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>Edge mode (Production / Construction / Upgrade / All)</td></tr>
@@ -1061,8 +1090,15 @@ let bgClickConsumed = false;
 // ══════════════════════════════════════════════════════════
 
 function updateStatsBar(nodeCount, edgeCount) {
+  lastNodeCount = nodeCount;
+  lastEdgeCount = edgeCount;
+  refreshStatsBar();
+}
+
+function refreshStatsBar() {
   const bar = document.getElementById("stats-bar");
-  bar.innerHTML = `<span>${nodeCount}</span> nodes &middot; <span>${edgeCount}</span> edges`;
+  const hint = selectedNodeId ? "" : ' &middot; <span style="color:var(--text-muted);font-weight:400">click a node to explore</span>';
+  bar.innerHTML = `<span>${lastNodeCount}</span> nodes &middot; <span>${lastEdgeCount}</span> edges${hint}`;
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1497,6 +1533,9 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       const prevId = selectedNodeId;
       selectedNodeId = d.id;
 
+      // Dismiss first-visit onboarding on first click
+      if (!localStorage.getItem("syx-vis-onboarded")) dismissOnboarding();
+
       const alreadyInTrail = breadcrumbHistory.some(b => b.id === d.id);
       if (alreadyInTrail) {
         renderBreadcrumbs();
@@ -1508,6 +1547,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       }
       restoreBaseState();
       openDetailForNode(d);
+      refreshStatsBar();
     });
 
     nodeGfxMap.set(d.id, { gfx: nodeContainer, strokeGfx, data: d, x: d.x, y: d.y });
@@ -1534,6 +1574,8 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       const prevId = selectedNodeId;
       selectedNodeId = nodeId;
 
+      if (!localStorage.getItem("syx-vis-onboarded")) dismissOnboarding();
+
       const alreadyInTrail = breadcrumbHistory.some(b => b.id === nodeId);
       if (alreadyInTrail) {
         renderBreadcrumbs();
@@ -1545,6 +1587,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       }
       restoreBaseState();
       openDetailForNode(nodeData);
+      refreshStatsBar();
 
       // Ping effect
       doPingEffect(nx, ny, nodeData.type);
@@ -2426,7 +2469,7 @@ function buildLegend() {
 
   const bldSection = document.createElement("div");
   bldSection.className = "legend-section";
-  bldSection.innerHTML = '<span class="legend-section-label">Bands</span>';
+  bldSection.innerHTML = '<span class="legend-section-label">Buildings</span>';
   for (const band of BAND_ORDER) {
     const color = BAND_COLORS[band];
     const item = document.createElement("div");
@@ -2454,6 +2497,45 @@ function buildLegend() {
 function findName(nodes, id) {
   const n = nodes.get(id);
   return n ? n.name : id;
+}
+
+// ══════════════════════════════════════════════════════════
+// First-visit onboarding
+// ══════════════════════════════════════════════════════════
+
+let onboardingHintEl = null;
+
+function showOnboarding() {
+  if (localStorage.getItem("syx-vis-onboarded")) return;
+
+  // Floating hint pill
+  onboardingHintEl = document.createElement("div");
+  onboardingHintEl.className = "onboarding-hint";
+  onboardingHintEl.innerHTML = `
+    <span class="onboarding-hint-icon">\u{1F446}</span>
+    <span class="onboarding-hint-text">Click any node to explore</span>
+    <button class="onboarding-hint-close">\u00D7</button>
+  `;
+  document.body.appendChild(onboardingHintEl);
+
+  onboardingHintEl.querySelector(".onboarding-hint-close").addEventListener("click", () => {
+    dismissOnboarding();
+  });
+
+  // Pulse the World Map node
+  const worldMapEntry = nodeGfxMap.get("world_map");
+  if (worldMapEntry) doHighlightPulse(worldMapEntry);
+}
+
+function dismissOnboarding() {
+  localStorage.setItem("syx-vis-onboarded", "1");
+  if (onboardingHintEl) {
+    onboardingHintEl.classList.add("dismissing");
+    onboardingHintEl.addEventListener("animationend", () => {
+      onboardingHintEl.remove();
+      onboardingHintEl = null;
+    });
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2523,4 +2605,7 @@ export async function render() {
   // Reveal — graph is fully built and zoom-to-fit already applied
   app.stage.visible = true;
   app.ticker.start();
+
+  // First-visit onboarding
+  showOnboarding();
 }
