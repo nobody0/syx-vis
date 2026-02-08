@@ -8,12 +8,12 @@
   <meta property="og:description" content="Interactive production chain visualizer for Songs of Syx">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://nobody0.github.io/syx-vis/">
-  <meta name="theme-color" content="#0f1419">
+  <meta name="theme-color" content="#0c1014">
   <title>Production Chain Atlas – Songs of Syx</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Fira+Code:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="display/style.css">
 
   <!-- D3.js v7.9.0 (UMD, attaches to window.d3) -->
@@ -36,11 +36,12 @@
       <h1>Production Chain Atlas</h1>
       <span class="subtitle">A community tool for Songs of Syx</span>
     </div>
+    <div class="header-sep"></div>
     <div id="tab-bar">
-      <button class="tab active" data-tab="graph" title="Alt+1">Graph</button>
-      <button class="tab" data-tab="population" title="Alt+2">Population Needs</button>
-      <button class="tab" data-tab="upkeep" title="Alt+3">Building Upkeep</button>
-      <button class="tab" data-tab="balancing" title="Alt+4">Production Balancing</button>
+      <button class="tab active" data-tab="graph" title="Alt+1"><span class="tab-icon">&#9671;</span> Graph</button>
+      <button class="tab" data-tab="population" title="Alt+2"><span class="tab-icon">&#9673;</span> Population</button>
+      <button class="tab" data-tab="upkeep" title="Alt+3"><span class="tab-icon">&#9651;</span> Upkeep</button>
+      <button class="tab" data-tab="balancing" title="Alt+4"><span class="tab-icon">&#9655;</span> Balancing</button>
     </div>
     <button id="help-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
   </div>
@@ -76,10 +77,10 @@
       document.body.style.display = "flex";
       document.body.style.justifyContent = "center";
       document.body.style.paddingTop = "20vh";
-      document.body.innerHTML = `<div style="color:#e0e4ea;font-family:system-ui;text-align:center">
-        <h2>Failed to load</h2>
-        <p style="color:#a8b0bc">${err.message || err}</p>
-        <p style="color:#8090a4;font-size:13px">Check the browser console for details.</p>
+      document.body.innerHTML = `<div style="color:#d8d2c4;font-family:system-ui;text-align:center">
+        <h2 style="font-family:Georgia,serif;font-style:italic">Failed to load</h2>
+        <p style="color:#a09882">${err.message || err}</p>
+        <p style="color:#706858;font-size:13px">Check the browser console for details.</p>
       </div>`;
     }
   </script>
