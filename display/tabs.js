@@ -53,7 +53,13 @@ async function switchTab(tabId) {
     } catch (err) {
       console.error(`Failed to load tab "${tabId}":`, err);
       const container = document.getElementById(`view-${tabId}`);
-      container.innerHTML = `<div class="calc-content"><p style="color:var(--state-ignored)">Failed to load: ${err.message}</p></div>`;
+      const errDiv = document.createElement("div");
+      errDiv.className = "calc-content";
+      const errP = document.createElement("p");
+      errP.style.color = "var(--state-ignored)";
+      errP.textContent = `Failed to load: ${err.message}`;
+      errDiv.appendChild(errP);
+      container.replaceChildren(errDiv);
     }
   }
 }

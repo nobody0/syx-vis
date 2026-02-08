@@ -3,7 +3,7 @@ import { equipment } from "../data/equipment.js";
 import { needs } from "../data/needs.js";
 import { buildings } from "../data/buildings.js";
 import { races } from "../data/races.js";
-import { capitalize } from "./config.js";
+import { capitalize, formatResourceName } from "./config.js";
 import { createAutocomplete } from "./filters.js";
 
 export function renderPopulation(container) {
@@ -397,10 +397,6 @@ function buildSpeciesComparisonMatrix() {
 /** Section header row spanning the full table */
 function sectionHeader(label, speciesCount) {
   return `<tr class="matrix-section-header"><td colspan="${speciesCount + 1}">${label}</td></tr>`;
-}
-
-function formatResourceName(id) {
-  return capitalize(id.replace(/_/g, " "));
 }
 
 function formatNum(n) {

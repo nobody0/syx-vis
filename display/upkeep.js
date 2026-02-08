@@ -1,6 +1,6 @@
 // Building Upkeep tab — maintenance costs from value degradation
 import { buildings } from "../data/buildings.js";
-import { capitalize } from "./config.js";
+import { formatResourceName } from "./config.js";
 
 export function renderUpkeep(container) {
   // Filter to buildings with degradation and construction costs
@@ -66,6 +66,3 @@ export function renderUpkeep(container) {
   container.innerHTML = html.join("\n");
 }
 
-function formatResourceName(id) {
-  return capitalize(id.replace(/_/g, " "));
-}

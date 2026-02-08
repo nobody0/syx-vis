@@ -1,17 +1,20 @@
 {
+  "name": "syx-vis",
+  "version": "1.0.0",
+  "description": "Production chain visualizer for Songs of Syx",
+  "license": "MIT",
   "type": "module",
   "scripts": {
+    "start": "npx serve .",
     "check": "tsc --project jsconfig.json --noEmit",
     "lint": "eslint .",
     "validate": "npm run check && npm run lint"
-  },
-  "dependencies": {
-    "pngjs": "^7.0.0"
   },
   "devDependencies": {
     "eslint": "^9",
     "@eslint/js": "^9",
     "globals": "^15",
+    "pngjs": "^7.0.0",
     "typescript": "^5"
   }
 }

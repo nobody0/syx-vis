@@ -225,7 +225,7 @@ function applyDirectionalHighlight(chain) {
       } else if (inFocus && nodeGfxMap.has(data.v) && nodeGfxMap.has(data.w)) {
         // In focus mode, keep edges between two visible nodes fully visible
         visGfx.alpha = 1;
-        if (labelText) { labelText.alpha = 1; labelText.style.fill = "#5a6a7c"; }
+        if (labelText) { labelText.alpha = 1; labelText.style.fill = "#7a8a9c"; }
         hitGfx.alpha = 1;
         hitGfx.eventMode = "static";
       } else {
@@ -236,7 +236,7 @@ function applyDirectionalHighlight(chain) {
       }
     } else {
       visGfx.alpha = 1;
-      if (labelText) { labelText.alpha = 1; labelText.style.fill = "#5a6a7c"; }
+      if (labelText) { labelText.alpha = 1; labelText.style.fill = "#7a8a9c"; }
       hitGfx.alpha = 1;
       hitGfx.eventMode = "static";
     }
@@ -253,7 +253,7 @@ function clearHighlight() {
 
   for (const [, entry] of edgeGfxMap) {
     entry.visGfx.alpha = 1;
-    if (entry.labelText) { entry.labelText.alpha = 1; entry.labelText.style.fill = "#5a6a7c"; }
+    if (entry.labelText) { entry.labelText.alpha = 1; entry.labelText.style.fill = "#7a8a9c"; }
     entry.hitGfx.alpha = 1;
     entry.hitGfx.eventMode = "static";
     redrawEdgeNormal(entry.visGfx, entry.data, entry.points);
@@ -378,7 +378,7 @@ function materializeEdgeLabels() {
       style: {
         fontFamily: '"Fira Code", "Consolas", monospace',
         fontSize: 10,
-        fill: "#5a6a7c",
+        fill: "#7a8a9c",
         align: "center",
       },
     });
@@ -1250,7 +1250,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
         redrawEdgeNormal(visGfx, d, points);
         const entry = edgeGfxMap.get(i);
         if (entry && entry.labelText) {
-          entry.labelText.style.fill = "#5a6a7c";
+          entry.labelText.style.fill = "#7a8a9c";
         }
       }
     });

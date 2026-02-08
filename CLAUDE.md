@@ -83,6 +83,14 @@ syx-vis/
 - Auto-generated data files include `@type` annotations (e.g., `/** @type {import('../types.js').Building[]} */`) emitted by the extraction script.
 - JSDoc `@param`/`@returns` annotations are on all exported functions and key internal functions in `derive/` and `display/config.js`.
 
+## Deployment
+
+The site is deployed to **GitHub Pages** at `https://nobody0.github.io/syx-vis/`.
+
+- **How:** A GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`. It uploads the repo root as a Pages artifact — no build step, since this is a static site.
+- **What's served:** The entire repo root. Dev-only files (`scripts/`, config) are included but harmless (not linked from the app).
+- **Icon case sensitivity:** GitHub Pages runs on Linux (case-sensitive). All icon filenames in `data/icons/` must be lowercase to match the references in `data/resources.js` and `data/buildings.js`. On Windows, `git config core.ignorecase true` can silently preserve old capitalized names in the index — if icons 404 on Pages, check `git ls-files data/icons/ | grep '[A-Z]'` and fix with `core.ignorecase=false`, `git rm --cached -r data/icons/`, `git add data/icons/`.
+
 ## Current Data (v70)
 
 - **42 resources:** 23 material, 8 food, 2 drink, 9 military

@@ -3,8 +3,6 @@
 
 /* ── Custom Properties ──────────────────────────────── */
 
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Fira+Code:wght@400;500&display=swap');
-
 :root {
   /* Fonts */
   --font-display: "DM Sans", "Segoe UI", system-ui, sans-serif;
@@ -27,7 +25,7 @@
   /* Text – cooler, higher contrast */
   --text-primary: #e0e4ea;
   --text-secondary: #a8b0bc;
-  --text-muted: #6a7488;
+  --text-muted: #8090a4;
   --text-bright: #f4f6f8;
 
   /* Accent – warm amber */

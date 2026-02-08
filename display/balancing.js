@@ -118,23 +118,8 @@ function calculateChain(targetResource, targetRate) {
   return steps;
 }
 
-let activeResultsDiv = null;
 let activeResourceId = null;
 let activeRate = null;
-
-// Subscribe to filter changes to auto-refresh
-let filterListenerInstalled = false;
-
-function installFilterListener() {
-  if (filterListenerInstalled) return;
-  filterListenerInstalled = true;
-  // Store a refresh callback so filter changes can trigger re-calculation
-  window._balancingRefresh = () => {
-    if (activeResultsDiv && activeResourceId && activeRate) {
-      runCalculation(activeResourceId, activeRate, activeResultsDiv);
-    }
-  };
-}
 
 export function renderBalancing(container) {
   const html = [];
@@ -176,7 +161,6 @@ export function renderBalancing(container) {
     if (!selectedResourceId) return;
     const rate = parseFloat(rateInput.value);
     if (isNaN(rate) || rate <= 0) return;
-    activeResultsDiv = resultsDiv;
     activeResourceId = selectedResourceId;
     activeRate = rate;
     runCalculation(selectedResourceId, rate, resultsDiv);
@@ -194,7 +178,6 @@ export function renderBalancing(container) {
     if (e.key === "Enter") calcBtn.click();
   });
 
-  installFilterListener();
 }
 
 function runCalculation(resourceId, rate, resultsDiv) {

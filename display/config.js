@@ -97,3 +97,11 @@ export const SERVICE_BAND_BY_MINICOLOR = {
 export function capitalize(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
+
+/**
+ * @param {string} id
+ * @returns {string}
+ */
+export function formatResourceName(id) {
+  return capitalize(id.replace(/_/g, " "));
+}
