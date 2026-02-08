@@ -1862,9 +1862,7 @@ function renderProducerComparison(panel, resourceId, producers, navToNode, appen
       .attr("class", "producer-card-rate")
       .text(formatRate(p.amount));
 
-    const recipe = building.recipes?.find(r =>
-      r.outputs.some(o => o.resource === resourceId)
-    );
+    const recipe = building.recipes?.find(r => r.id === p.recipeId);
 
     if (recipe && recipe.inputs.length > 0) {
       const inputsDiv = card.append("div").attr("class", "producer-card-inputs");
