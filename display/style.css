@@ -3312,7 +3312,7 @@ body:has(.focus-bar) #breadcrumb-bar {
 
 .planner-thumb.thumb-disabled {
   opacity: 0.25;
-  pointer-events: none;
+  cursor: not-allowed;
 }
 
 .thumb-grid {

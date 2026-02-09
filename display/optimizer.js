@@ -98,16 +98,13 @@ export async function runOptimizer(input) {
     // Restart 1: skip every 4th hero placement for diversity
     const skipInterval = restart === 0 ? 0 : 4;
     await constructivePhase(ctx, skipInterval);
-    logPhaseState(ctx, `run${restart} constructive`);
     ctx.constructiveSnapshot = takeSnapshot(ctx);
 
     // Phase 2: Simulated annealing
     await simulatedAnnealing(ctx);
-    logPhaseState(ctx, `run${restart} SA`);
 
     // Phase 2.5: Post-SA polish
     await polishPhase(ctx);
-    logPhaseState(ctx, `run${restart} polish`);
 
     const score = scoreLayoutSA(ctx);
     if (score > bestResultScore) {
@@ -119,29 +116,20 @@ export async function runOptimizer(input) {
   // Restore the best result
   restoreSnapshot(ctx, bestResult);
   ctx.constructiveSnapshot = bestResult; // for validation fallback
-  logPhaseState(ctx, "bestResult restored");
 
   // Phase 3: Room trimming (run once on winner)
   await trimPhase(ctx);
-  logPhaseState(ctx, "trim");
 
   // Phase 3c: Micro gap-fill pass
   await microGapFill(ctx);
-  logPhaseState(ctx, "microGapFill");
 
   // Phase 4: Door optimization
   doorPhase(ctx);
-  logPhaseState(ctx, "doorPhase");
 
   // Phase 5: Final validation
   if (!validateFinal(ctx)) {
-    console.log(`[optimizer] validateFinal FAILED after trim+doors (${ctx.doors.size} doors lost) — reverting to constructive snapshot`);
-    console.log(`[optimizer] validateFinal details: walk=${checkWalkabilityOpt(ctx)} stab=${checkStabilityOpt(ctx)} storage=${!(ctx.building.storage > 0 && ctx.placements.length > 0 && !hasStorageTile(ctx))} conn=${checkRoomConnectivity(ctx)}`);
     restoreSnapshot(ctx, ctx.constructiveSnapshot);
   }
-
-  // Cross-validation: rebuild blocker map from scratch and compare
-  crossValidateState(ctx);
 
   return { room: ctx.room, placements: ctx.placements, doors: ctx.doors };
 }
@@ -252,17 +240,6 @@ function rebuildRoomTiles(ctx) {
       }
   // Rebuild group counts
   rebuildGroupCounts(ctx);
-}
-
-function logPhaseState(ctx, phase) {
-  const roomTiles = ctx.roomTiles.length;
-  let openTiles = 0;
-  for (let r = 0; r < ctx.gridH; r++)
-    for (let c = 0; c < ctx.gridW; c++)
-      if (ctx.room[r][c] && ctx.blockerCount[r][c] === 0) openTiles++;
-  const walk = checkWalkabilityOpt(ctx);
-  const conn = checkRoomConnectivity(ctx);
-  console.log(`[optimizer] ${phase}: placements=${ctx.placements.length} room=${roomTiles} open=${openTiles} walk=${walk} conn=${conn}`);
 }
 
 function rebuildGroupCounts(ctx) {
@@ -2445,43 +2422,73 @@ async function trimPhase(ctx) {
     await createSupportPillars(ctx);
   }
 
-  // Pass 2: Trim unoccupied tiles (edge AND interior) that aren't needed
+  // Pass 2: Trim unoccupied tiles that actually reduce the building footprint.
+  // The game places walls 8-directionally around room tiles. Removing a single edge
+  // tile just converts it to a wall — no footprint reduction. We need to only trim
+  // tiles whose removal frees wall tiles that were exclusively caused by that room tile.
   for (let pass = 0; pass < 5; pass++) {
     let trimmed = false;
     await yieldToUI();
 
-    // Compute centroid
-    let cr = 0, cc = 0, cnt = 0;
-    for (const t of ctx.roomTiles) { cr += t.r; cc += t.c; cnt++; }
-    if (cnt === 0) break;
-    cr /= cnt; cc /= cnt;
+    // Build wall reference count: for each non-room tile, count 8-dir adjacent room tiles.
+    // Tiles with wallRef[r][c] == 1 are walls caused by a single room tile.
+    const wallRef = Array.from({ length: ctx.gridH }, () => new Int8Array(ctx.gridW));
+    for (let r = 0; r < ctx.gridH; r++) {
+      for (let c = 0; c < ctx.gridW; c++) {
+        if (ctx.room[r][c]) continue;
+        let count = 0;
+        for (const [dr, dc] of DIRS8) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) {
+            count++;
+          }
+        }
+        wallRef[r][c] = count;
+      }
+    }
 
-    // Phase 3a: Collect unoccupied tiles, sort by "wasted-ness":
-    // fewer occupied neighbors → more wasted → trimmed first; then farthest from centroid
+    // Collect unoccupied room tiles and compute footprint reduction
     const candidates = [];
     for (let r = 0; r < ctx.gridH; r++) {
       for (let c = 0; c < ctx.gridW; c++) {
         if (!ctx.room[r][c]) continue;
         if (ctx.occupancy[r][c] >= 0) continue;
-        const dist = Math.abs(r - cr) + Math.abs(c - cc);
-        let occNeighbors = 0;
-        for (const [dr, dc] of DIRS) {
+
+        // Compute how many footprint tiles would be freed by removing (r,c)
+        let fpReduction = 0;
+
+        // Check (r,c) itself: becomes free only if no remaining room tile is 8-dir adjacent
+        let hasRoomNeighbor8 = false;
+        for (const [dr, dc] of DIRS8) {
           const nr = r + dr, nc = c + dc;
-          if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW
-              && ctx.room[nr][nc] && ctx.occupancy[nr][nc] >= 0) {
-            occNeighbors++;
+          if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) {
+            hasRoomNeighbor8 = true;
+            break;
           }
         }
-        candidates.push({ r, c, dist, occNeighbors });
+        if (!hasRoomNeighbor8) fpReduction++; // position exits footprint entirely
+
+        // Check 8-dir non-room neighbors: freed if their only room neighbor was (r,c)
+        for (const [dr, dc] of DIRS8) {
+          const nr = r + dr, nc = c + dc;
+          if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW) continue;
+          if (ctx.room[nr][nc]) continue; // room tile, not a wall
+          if (wallRef[nr][nc] === 1) fpReduction++; // exclusively our wall → freed
+        }
+
+        if (fpReduction > 0) {
+          candidates.push({ r, c, fpReduction });
+        }
       }
     }
 
-    // Fewer occupied neighbors first (most wasted), then farthest from centroid
-    candidates.sort((a, b) => a.occNeighbors - b.occNeighbors || b.dist - a.dist);
+    // Most footprint reduction first
+    candidates.sort((a, b) => b.fpReduction - a.fpReduction);
 
     for (const cand of candidates) {
       if (canEraseTile(ctx, cand.r, cand.c)) {
         ctx.room[cand.r][cand.c] = false;
+        ctx.roomTileSet.delete(cand.r * ctx.gridW + cand.c);
         const idx = ctx.roomTiles.findIndex(t => t.r === cand.r && t.c === cand.c);
         if (idx >= 0) ctx.roomTiles.splice(idx, 1);
         trimmed = true;
@@ -2691,19 +2698,12 @@ function doorPhase(ctx) {
 
   const outside = findOutsideTiles(ctx);
 
-  // Diagnostic counters
-  let nonRoomCount = 0, outsideCount = 0, adjRoomCount = 0;
-  let rejNotOutside = 0, rejNoAxis = 0, rejPerp = 0;
-
   // Valid door: outer wall tile that connects room to open exterior
   const candidates = [];
   for (let r = 0; r < ctx.gridH; r++) {
     for (let c = 0; c < ctx.gridW; c++) {
       if (ctx.room[r][c]) continue;
-      nonRoomCount++;
-
-      if (!outside[r][c]) { rejNotOutside++; continue; }
-      outsideCount++;
+      if (!outside[r][c]) continue;
 
       // Check if adjacent to any room tile
       let hasAdj = false;
@@ -2714,7 +2714,6 @@ function doorPhase(ctx) {
         }
       }
       if (!hasAdj) continue;
-      adjRoomCount++;
 
       // Door must connect outside to room along the SAME axis:
       // one side is room, opposite side is open exterior.
@@ -2722,7 +2721,6 @@ function doorPhase(ctx) {
       // this prevents doors at trimmed corners/notches where the wall
       // changes direction (diagonal-only connection to part of the room).
       let validDoor = false;
-      let anyAxisPass = false;
       for (const [dr, dc] of DIRS) {
         const ar = r + dr, ac = c + dc;
         const br = r - dr, bc = c - dc;
@@ -2733,7 +2731,6 @@ function doorPhase(ctx) {
         const aIsOpen = isOpenTile(ctx, ar, ac);
         const bIsOpen = isOpenTile(ctx, br, bc);
         if ((aIsRoom && bIsOpen) || (bIsRoom && aIsOpen)) {
-          anyAxisPass = true;
           // Check perpendicular: neither side should be room (flat wall check)
           const pr1 = r + dc, pc1 = c + dr;
           const pr2 = r - dc, pc2 = c - dr;
@@ -2747,18 +2744,24 @@ function doorPhase(ctx) {
           }
         }
       }
+      if (!validDoor) continue;
 
-      if (!validDoor) {
-        if (!anyAxisPass) rejNoAxis++;
-        else rejPerp++;
-        continue;
+      // Door must have at least one adjacent walkable room tile — a door behind
+      // furniture is useless since workers can't reach it
+      let hasWalkable = false;
+      for (const [dr, dc] of DIRS) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW
+            && ctx.room[nr][nc] && ctx.blockerCount[nr][nc] === 0) {
+          hasWalkable = true;
+          break;
+        }
       }
+      if (!hasWalkable) continue;
+
       candidates.push({ r, c });
     }
   }
-
-  console.log(`[optimizer] doorPhase: grid=${ctx.gridW}x${ctx.gridH} nonRoom=${nonRoomCount} outside=${outsideCount} adjRoom=${adjRoomCount} candidates=${candidates.length}`);
-  console.log(`[optimizer] doorPhase rejections: notOutside=${rejNotOutside} noAxisPass=${rejNoAxis} perpFail=${rejPerp}`);
 
   if (candidates.length === 0) return;
 
@@ -2766,8 +2769,6 @@ function doorPhase(ctx) {
   // average walk distance from work/storage tiles to their nearest door.
   // This naturally spaces doors around the room perimeter.
   // All valid doors are placed (marginal scoring controls order, not count).
-  let isoRejected = 0;
-  let doorsPlaced = 0;
   while (candidates.length > 0) {
     // Pass 1: Filter candidates that would break isolation (with current doors)
     for (let i = candidates.length - 1; i >= 0; i--) {
@@ -2777,7 +2778,6 @@ function doorPhase(ctx) {
       ctx.doors.delete(`${cand.r},${cand.c}`);
       if (iso < 0.995) {
         candidates.splice(i, 1);
-        isoRejected++;
       }
     }
 
@@ -2785,7 +2785,7 @@ function doorPhase(ctx) {
 
     // Pass 2: Score each remaining candidate by resulting avg walk distance
     // First door: minimize distance to storage; subsequent: minimize distance to workstations
-    const target = doorsPlaced === 0 ? "storage" : "work";
+    const target = ctx.doors.size === 0 ? "storage" : "work";
     let bestIdx = -1;
     let bestAvg = Infinity;
     for (let i = 0; i < candidates.length; i++) {
@@ -2804,9 +2804,7 @@ function doorPhase(ctx) {
     const best = candidates[bestIdx];
     ctx.doors.add(`${best.r},${best.c}`);
     candidates.splice(bestIdx, 1);
-    doorsPlaced++;
   }
-  console.log(`[optimizer] doorPhase result: ${doorsPlaced} doors placed, ${isoRejected} rejected by isolation, ${candidates.length} remaining`);
 }
 
 /** Multi-source BFS from all placed doors. Returns avg walk distance to target tiles.
@@ -2882,144 +2880,6 @@ function computeAvgWalkDistance(ctx, target) {
 
   if (count === 0) return Infinity;
   return totalDist / count;
-}
-
-// ── Cross-validation (debug) ─────────────────────────────
-
-function crossValidateState(ctx) {
-  const { furnitureSet: fs, gridW, gridH, room, placements } = ctx;
-
-  // Rebuild blocker map from scratch (like the planner does)
-  const freshBlocked = Array.from({ length: gridH }, () => Array(gridW).fill(false));
-  for (const p of placements) {
-    const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-    for (let r = 0; r < tiles.length; r++) {
-      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-        const tileKey = tiles[r][c];
-        if (tileKey === null) continue;
-        const gr = p.row + r, gc = p.col + c;
-        if (gr < 0 || gr >= gridH || gc < 0 || gc >= gridW) continue;
-        const tt = fs.tileTypes[tileKey];
-        if (tt && AVAIL_BLOCKING.has(tt.availability)) {
-          freshBlocked[gr][gc] = true;
-        }
-      }
-    }
-  }
-
-  // Compare with incremental blockerCount
-  let blockerMismatches = 0;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      const fresh = freshBlocked[r][c];
-      const incremental = ctx.blockerCount[r][c] > 0;
-      if (fresh !== incremental) {
-        blockerMismatches++;
-        if (blockerMismatches <= 5) {
-          console.warn(`[optimizer] blockerCount MISMATCH at (${r},${c}): fresh=${fresh}, incremental=${ctx.blockerCount[r][c]}`);
-        }
-      }
-    }
-  }
-  if (blockerMismatches > 0) {
-    console.error(`[optimizer] BLOCKER COUNT DESYNC: ${blockerMismatches} mismatches! Rebuilding...`);
-    // Fix: rebuild from scratch
-    ctx.occupancy = buildOccupancyGrid(ctx);
-  }
-
-  // Now do a fresh walkability BFS using the fresh blocker map
-  let totalOpen = 0, startR = -1, startC = -1;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (room[r][c] && !freshBlocked[r][c]) {
-        totalOpen++;
-        if (startR < 0) { startR = r; startC = c; }
-      }
-    }
-  }
-
-  if (totalOpen > 0 && startR >= 0) {
-    const visited = Array.from({ length: gridH }, () => Array(gridW).fill(false));
-    const queue = [[startR, startC]];
-    visited[startR][startC] = true;
-    let reached = 1;
-    while (queue.length > 0) {
-      const [cr, cc] = queue.shift();
-      for (const [dr, dc] of DIRS) {
-        const nr = cr + dr, nc = cc + dc;
-        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
-        if (visited[nr][nc] || !room[nr][nc] || freshBlocked[nr][nc]) continue;
-        visited[nr][nc] = true;
-        reached++;
-        queue.push([nr, nc]);
-      }
-    }
-    const disconnected = totalOpen - reached;
-    if (disconnected > 0) {
-      console.error(`[optimizer] CROSS-VALIDATION FAIL: ${disconnected} open tiles disconnected (totalOpen=${totalOpen}, reached=${reached})`);
-    }
-
-    // Check piece reachability
-    let unreachablePieces = 0;
-    for (const p of placements) {
-      const pTiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-      let pieceReachable = false;
-      for (let r = 0; r < pTiles.length && !pieceReachable; r++) {
-        for (let c = 0; c < (pTiles[r]?.length ?? 0) && !pieceReachable; c++) {
-          if (pTiles[r][c] === null) continue;
-          const gr = p.row + r, gc = p.col + c;
-          for (const [dr, dc] of DIRS) {
-            const nr = gr + dr, nc = gc + dc;
-            if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && visited[nr][nc]) {
-              pieceReachable = true;
-              break;
-            }
-          }
-        }
-      }
-      if (!pieceReachable) unreachablePieces++;
-    }
-    if (unreachablePieces > 0) {
-      console.error(`[optimizer] CROSS-VALIDATION FAIL: ${unreachablePieces} pieces unreachable`);
-    }
-
-    if (disconnected === 0 && unreachablePieces === 0) {
-      console.log(`[optimizer] cross-validation PASSED: ${placements.length} placements, ${totalOpen} open tiles, all connected & reachable`);
-    }
-  } else {
-    console.log(`[optimizer] cross-validation: ${totalOpen} open tiles, ${placements.length} placements`);
-  }
-
-  // Room connectivity check
-  let totalRoom = 0, rStartR = -1, rStartC = -1;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (room[r][c]) {
-        totalRoom++;
-        if (rStartR < 0) { rStartR = r; rStartC = c; }
-      }
-    }
-  }
-  if (totalRoom > 0 && rStartR >= 0) {
-    const rVisited = Array.from({ length: gridH }, () => Array(gridW).fill(false));
-    const rQueue = [[rStartR, rStartC]];
-    rVisited[rStartR][rStartC] = true;
-    let rReached = 1;
-    while (rQueue.length > 0) {
-      const [cr, cc] = rQueue.shift();
-      for (const [dr, dc] of DIRS) {
-        const nr = cr + dr, nc = cc + dc;
-        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
-        if (rVisited[nr][nc] || !room[nr][nc]) continue;
-        rVisited[nr][nc] = true;
-        rReached++;
-        rQueue.push([nr, nc]);
-      }
-    }
-    if (rReached < totalRoom) {
-      console.error(`[optimizer] ROOM DISCONNECTED: ${totalRoom - rReached} tiles unreachable (total=${totalRoom}, reached=${rReached})`);
-    }
-  }
 }
 
 // ── Phase 5: Final Validation ────────────────────────────
