@@ -856,7 +856,26 @@ function canPlace(groupIdx, itemIdx, rotation, row, col) {
     }
   }
 
-  // Pass 4: room connectivity — placement must not split room into disconnected regions
+  // Pass 4: furniture reachability — the piece as a whole must have at least one
+  // walkable (non-blocked) neighbor on its perimeter. Workers can walk on
+  // non-blocking occupied tiles, so only blockers prevent reachability.
+  const proposedSet = new Set(proposedTiles.map(t => `${t.gr},${t.gc}`));
+  let hasWalkableNeighbor = false;
+  for (const { gr, gc } of proposedTiles) {
+    if (hasWalkableNeighbor) break;
+    for (const [dr, dc] of DIRS) {
+      const nr = gr + dr, nc = gc + dc;
+      if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) continue;
+      if (!state.room[nr][nc]) continue;
+      if (proposedSet.has(`${nr},${nc}`)) continue; // part of this piece
+      if (isBlockerAt(nr, nc, proposedBlockers)) continue;
+      hasWalkableNeighbor = true;
+      break;
+    }
+  }
+  if (!hasWalkableNeighbor) return { ok: false, reason: "Furniture would be fully enclosed" };
+
+  // Pass 5: room connectivity — placement must not split room into disconnected regions
   if (proposedBlockers.size > 0) {
     if (wouldDisconnectRoom(proposedBlockers)) return { ok: false, reason: "Would split room" };
   }
@@ -1005,6 +1024,43 @@ function checkWalkability() {
     }
     if (!reachable) unreachable.push({ row, col });
   }
+
+  // Furniture piece reachability: every placement must have at least one
+  // walkable neighbor on its perimeter. Fully enclosed pieces are unusable.
+  const enclosed = [];
+  for (const p of state.placements) {
+    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
+    if (!item) continue;
+    const pTiles = getRotatedTiles(item, p.rotation);
+    let pieceReachable = false;
+    for (let r = 0; r < pTiles.length && !pieceReachable; r++) {
+      for (let c = 0; c < (pTiles[r]?.length ?? 0) && !pieceReachable; c++) {
+        if (pTiles[r][c] === null) continue;
+        const gr = p.row + r, gc = p.col + c;
+        for (const [dr, dc] of DIRS) {
+          const nr = gr + dr, nc = gc + dc;
+          if (nr >= 0 && nr < state.gridH && nc >= 0 && nc < state.gridW && visited[nr][nc]) {
+            pieceReachable = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!pieceReachable) {
+      // Report the top-left tile of the enclosed piece
+      for (let r = 0; r < pTiles.length; r++) {
+        for (let c = 0; c < (pTiles[r]?.length ?? 0); c++) {
+          if (pTiles[r][c] !== null) {
+            enclosed.push({ row: p.row + r, col: p.col + c });
+            break;
+          }
+        }
+        if (enclosed.length > unreachable.length) break; // only need one tile per piece
+      }
+    }
+  }
+  // Merge enclosed into unreachable for unified reporting
+  for (const e of enclosed) unreachable.push(e);
 
   // Room connectivity: count disconnected tiles
   const disconnected = totalOpen - reached;

@@ -7,19 +7,27 @@ const filterState = {
   resourceCategories: {},    // { [cat]: boolean }
   edgeMode: "construction",  // "production"|"construction"|"upgrade"|"all"
   showFiltered: false,
-  resourceStates: new Map(),  // Map<resourceId, "bought"|"produced"|"ignored">
+  buildingStates: new Map(),  // Map<buildingId, "built"|"ignored">
+  resourceStates: new Map(),  // Map<resourceId, "bought"|"ignored">
   recipeStates: new Map(),    // Map<recipeId, number> (weight; 0 = disabled, absent = default 1)
   focusMode: null,            // null | { targetId: string, upstreamDepth: number|Infinity, downstreamDepth: number }
 };
 
 const STORAGE_KEY = "syx-vis-filters";
+const CITIES_KEY = "syx-vis-cities";
 
 function saveFilterState() {
+  // If a city is active, write state maps back to the city
+  const cityId = getActiveCityId();
+  if (cityId) {
+    _saveCityStates(cityId);
+  }
   const data = {
     buildingCategories: filterState.buildingCategories,
     resourceCategories: filterState.resourceCategories,
     edgeMode: filterState.edgeMode,
     showFiltered: filterState.showFiltered,
+    buildingStates: Object.fromEntries(filterState.buildingStates),
     resourceStates: Object.fromEntries(filterState.resourceStates),
     recipeStates: Object.fromEntries(filterState.recipeStates),
   };
@@ -37,8 +45,15 @@ function loadFilterState() {
       filterState.edgeMode = data.edgeMode;
     }
     if (typeof data.showFiltered === "boolean") filterState.showFiltered = data.showFiltered;
+    if (data.buildingStates) {
+      for (const [id, state] of Object.entries(data.buildingStates)) {
+        filterState.buildingStates.set(id, state);
+      }
+    }
     if (data.resourceStates) {
       for (const [id, state] of Object.entries(data.resourceStates)) {
+        // Migration: drop "produced" entries from old data
+        if (state === "produced") continue;
         filterState.resourceStates.set(id, state);
       }
     }
@@ -50,7 +65,243 @@ function loadFilterState() {
   } catch { /* localStorage unavailable */ }
 }
 
+// ── City profiles ──
+
+/** @returns {{ version: number, activeCityId: string|null, cities: import('../types.js').CityData[] }} */
+function _loadCities() {
+  try {
+    const raw = localStorage.getItem(CITIES_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (data && data.version === 1) return data;
+    }
+  } catch { /* */ }
+  return { version: 1, activeCityId: null, cities: [] };
+}
+
+function _saveCities(data) {
+  try { localStorage.setItem(CITIES_KEY, JSON.stringify(data)); } catch { /* */ }
+}
+
+function _saveCityStates(cityId) {
+  const data = _loadCities();
+  const city = data.cities.find(c => c.id === cityId);
+  if (!city) return;
+  city.buildingStates = Object.fromEntries(filterState.buildingStates);
+  city.recipeStates = Object.fromEntries(filterState.recipeStates);
+  city.resourceStates = Object.fromEntries(filterState.resourceStates);
+  _saveCities(data);
+}
+
+export function getCities() {
+  return _loadCities().cities;
+}
+
+export function getActiveCityId() {
+  return _loadCities().activeCityId;
+}
+
+export function getActiveCityName() {
+  const data = _loadCities();
+  if (!data.activeCityId) return null;
+  const city = data.cities.find(c => c.id === data.activeCityId);
+  return city ? city.name : null;
+}
+
+/**
+ * Create a new city and switch to it. World Map is auto-built.
+ * @param {string} name
+ * @returns {string} cityId
+ */
+export function createCity(name) {
+  const data = _loadCities();
+  const id = "city_" + Date.now();
+  data.cities.push({
+    id,
+    name,
+    buildingStates: { world_map: "built" },
+    recipeStates: {},
+    resourceStates: {},
+  });
+  data.activeCityId = id;
+  _saveCities(data);
+  // Load into filterState
+  filterState.buildingStates.clear();
+  filterState.buildingStates.set("world_map", "built");
+  filterState.recipeStates.clear();
+  filterState.resourceStates.clear();
+  return id;
+}
+
+/**
+ * @param {string} cityId
+ */
+export function deleteCity(cityId) {
+  const data = _loadCities();
+  data.cities = data.cities.filter(c => c.id !== cityId);
+  if (data.activeCityId === cityId) {
+    data.activeCityId = null;
+    // Reload scratchpad
+    filterState.buildingStates.clear();
+    filterState.resourceStates.clear();
+    filterState.recipeStates.clear();
+    _loadScratchpad();
+  }
+  _saveCities(data);
+}
+
+/**
+ * @param {string} cityId
+ * @param {string} name
+ */
+export function renameCity(cityId, name) {
+  const data = _loadCities();
+  const city = data.cities.find(c => c.id === cityId);
+  if (city) {
+    city.name = name;
+    _saveCities(data);
+  }
+}
+
+/**
+ * Switch to a city, loading its state maps.
+ * @param {string} cityId
+ */
+export function switchCity(cityId) {
+  // Save current city if any
+  const data = _loadCities();
+  if (data.activeCityId) {
+    _saveCityStates(data.activeCityId);
+  }
+  const city = data.cities.find(c => c.id === cityId);
+  if (!city) return;
+  data.activeCityId = cityId;
+  _saveCities(data);
+  // Load city states
+  filterState.buildingStates.clear();
+  filterState.resourceStates.clear();
+  filterState.recipeStates.clear();
+  if (city.buildingStates) {
+    for (const [id, state] of Object.entries(city.buildingStates)) {
+      filterState.buildingStates.set(id, state);
+    }
+  }
+  filterState.buildingStates.set("world_map", "built"); // always built
+  if (city.resourceStates) {
+    for (const [id, state] of Object.entries(city.resourceStates)) {
+      if (state === "produced") continue; // migration
+      filterState.resourceStates.set(id, state);
+    }
+  }
+  if (city.recipeStates) {
+    for (const [id, weight] of Object.entries(city.recipeStates)) {
+      filterState.recipeStates.set(id, weight);
+    }
+  }
+}
+
+/** Deactivate city, reload scratchpad state. */
+export function deactivateCity() {
+  const data = _loadCities();
+  if (data.activeCityId) {
+    _saveCityStates(data.activeCityId);
+  }
+  data.activeCityId = null;
+  _saveCities(data);
+  // Reload scratchpad
+  filterState.buildingStates.clear();
+  filterState.resourceStates.clear();
+  filterState.recipeStates.clear();
+  _loadScratchpad();
+}
+
+function _loadScratchpad() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data.buildingStates) {
+      for (const [id, state] of Object.entries(data.buildingStates)) {
+        filterState.buildingStates.set(id, state);
+      }
+    }
+    if (data.resourceStates) {
+      for (const [id, state] of Object.entries(data.resourceStates)) {
+        if (state === "produced") continue;
+        filterState.resourceStates.set(id, state);
+      }
+    }
+    if (data.recipeStates) {
+      for (const [id, weight] of Object.entries(data.recipeStates)) {
+        filterState.recipeStates.set(id, weight);
+      }
+    }
+  } catch { /* */ }
+}
+
 loadFilterState();
+
+// If a city was active, load its states
+{
+  const cityData = _loadCities();
+  if (cityData.activeCityId) {
+    const city = cityData.cities.find(c => c.id === cityData.activeCityId);
+    if (city) {
+      filterState.buildingStates.clear();
+      filterState.resourceStates.clear();
+      filterState.recipeStates.clear();
+      if (city.buildingStates) {
+        for (const [id, state] of Object.entries(city.buildingStates)) {
+          filterState.buildingStates.set(id, state);
+        }
+      }
+      if (city.resourceStates) {
+        for (const [id, state] of Object.entries(city.resourceStates)) {
+          if (state === "produced") continue;
+          filterState.resourceStates.set(id, state);
+        }
+      }
+      if (city.recipeStates) {
+        for (const [id, weight] of Object.entries(city.recipeStates)) {
+          filterState.recipeStates.set(id, weight);
+        }
+      }
+      filterState.buildingStates.set("world_map", "built"); // always built
+    }
+  }
+}
+
+// ── Building state API (exported for render.js) ──
+
+/**
+ * @param {string} id
+ * @param {string|null} state - "built"|"ignored"|null
+ */
+export function setBuildingState(id, state) {
+  if (id === "world_map") return; // World Map is always built
+  if (state) {
+    filterState.buildingStates.set(id, state);
+  } else {
+    filterState.buildingStates.delete(id);
+  }
+}
+
+/**
+ * @param {string} id
+ * @returns {string|null}
+ */
+export function getBuildingState(id) {
+  return filterState.buildingStates.get(id) || null;
+}
+
+export function getBuildingStates() {
+  return filterState.buildingStates;
+}
+
+export function clearAllBuildingStates() {
+  filterState.buildingStates.clear();
+  filterState.buildingStates.set("world_map", "built");
+}
 
 // ── Resource state API (exported for render.js) ──
 
@@ -76,6 +327,31 @@ export function getResourceState(id) {
 
 export function isShowFiltered() {
   return filterState.showFiltered;
+}
+
+/**
+ * Derive which resources are available based on built buildings and bought resources.
+ * A resource is available if: it's "bought", OR it's output of any "built" building's active recipe (weight > 0).
+ * @param {Map<string, Object>} fullNodes
+ * @param {import('../types.js').GraphEdge[]} fullEdges
+ * @returns {Set<string>}
+ */
+export function getAvailableResources(fullNodes, fullEdges) {
+  const available = new Set();
+  // Bought resources
+  for (const [id, state] of filterState.resourceStates) {
+    if (state === "bought") available.add(id);
+  }
+  // Outputs of built buildings with active recipes
+  for (const e of fullEdges) {
+    if (e.direction !== "output") continue;
+    if (!e.recipeId) continue;
+    const bState = filterState.buildingStates.get(e.from);
+    if (bState !== "built") continue;
+    const weight = getRecipeWeight(e.recipeId);
+    if (weight > 0) available.add(e.to);
+  }
+  return available;
 }
 
 // ── Edge mode API (exported for render.js) ──
@@ -165,6 +441,12 @@ export function refreshResourceGrid() {
 }
 
 export function clearAllResourceStates() {
+  filterState.resourceStates.clear();
+}
+
+export function clearAllStates() {
+  filterState.buildingStates.clear();
+  filterState.buildingStates.set("world_map", "built");
   filterState.resourceStates.clear();
 }
 
@@ -417,6 +699,8 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
 
   function updateFilterBadge() {
     let count = 0;
+    // Count non-default building states
+    count += filterState.buildingStates.size;
     // Count non-default resource states
     count += filterState.resourceStates.size;
     // Count hidden building categories
@@ -583,7 +867,7 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
 
   function refreshActiveStates() {
     // Update section label with count
-    const count = filterState.resourceStates.size;
+    const count = filterState.resourceStates.size + filterState.buildingStates.size;
     statesSection.textContent = "";
     statesSection.appendChild(document.createTextNode(`ACTIVE STATES`));
     if (count > 0) {
@@ -594,7 +878,7 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
     statesContainer.innerHTML = "";
 
     if (count === 0) {
-      statesContainer.appendChild(elText("div", "No resource states set. Use detail panel to mark resources as Bought, Producing, or Ignored.", "active-states-empty"));
+      statesContainer.appendChild(elText("div", "No states set. Use detail panel to mark buildings as Built or resources as Bought.", "active-states-empty"));
       return;
     }
 
@@ -602,6 +886,8 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
     const hdr = el("div", "active-states-header");
     const clearBtn = elText("button", "Clear All", "active-states-clear");
     clearBtn.addEventListener("click", () => {
+      filterState.buildingStates.clear();
+      filterState.buildingStates.set("world_map", "built"); // always built
       filterState.resourceStates.clear();
       refreshActiveStates();
       fire();
@@ -609,20 +895,44 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
     hdr.appendChild(clearBtn);
     statesContainer.appendChild(hdr);
 
-    // Group by state
-    const groups = { bought: [], produced: [], ignored: [] };
-    for (const [id, state] of filterState.resourceStates) {
-      if (groups[state]) groups[state].push(id);
+    // Built buildings
+    const builtIds = [];
+    for (const [id, state] of filterState.buildingStates) {
+      if (state === "built") builtIds.push(id);
+    }
+    if (builtIds.length > 0) {
+      const group = el("div", "active-states-group");
+      group.appendChild(elText("div", `Built (${builtIds.length})`, "active-states-group-label state-built"));
+      const pills = el("div", "active-states-pills");
+      for (const id of builtIds) {
+        const node = fullNodes.get(id);
+        const pill = el("span", "active-state-pill");
+        if (node && node.icon) {
+          const img = document.createElement("img");
+          img.src = `data/icons/${node.icon}`;
+          img.alt = node ? node.name : id;
+          pill.appendChild(img);
+        }
+        pill.appendChild(elText("span", node ? node.name : id));
+        pill.addEventListener("click", () => {
+          if (navigateToNode) navigateToNode(id);
+        });
+        pills.appendChild(pill);
+      }
+      group.appendChild(pills);
+      statesContainer.appendChild(group);
     }
 
-    for (const [state, ids] of Object.entries(groups)) {
-      if (ids.length === 0) continue;
+    // Bought resources
+    const boughtIds = [];
+    for (const [id, state] of filterState.resourceStates) {
+      if (state === "bought") boughtIds.push(id);
+    }
+    if (boughtIds.length > 0) {
       const group = el("div", "active-states-group");
-      const labels = { bought: "Bought", produced: "Producing", ignored: "Ignored" };
-      group.appendChild(elText("div", labels[state], `active-states-group-label state-${state}`));
-
+      group.appendChild(elText("div", `Bought (${boughtIds.length})`, "active-states-group-label state-bought"));
       const pills = el("div", "active-states-pills");
-      for (const id of ids) {
+      for (const id of boughtIds) {
         const res = resourceById.get(id);
         const pill = el("span", "active-state-pill");
         if (res && res.icon) {
@@ -632,6 +942,37 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
           pill.appendChild(img);
         }
         pill.appendChild(elText("span", res ? res.name : id));
+        pill.addEventListener("click", () => {
+          if (navigateToNode) navigateToNode(id);
+        });
+        pills.appendChild(pill);
+      }
+      group.appendChild(pills);
+      statesContainer.appendChild(group);
+    }
+
+    // Ignored (both buildings and resources)
+    const ignoredIds = [];
+    for (const [id, state] of filterState.buildingStates) {
+      if (state === "ignored") ignoredIds.push(id);
+    }
+    for (const [id, state] of filterState.resourceStates) {
+      if (state === "ignored") ignoredIds.push(id);
+    }
+    if (ignoredIds.length > 0) {
+      const group = el("div", "active-states-group");
+      group.appendChild(elText("div", `Ignored (${ignoredIds.length})`, "active-states-group-label state-ignored"));
+      const pills = el("div", "active-states-pills");
+      for (const id of ignoredIds) {
+        const node = fullNodes.get(id) || resourceById.get(id);
+        const pill = el("span", "active-state-pill");
+        if (node && node.icon) {
+          const img = document.createElement("img");
+          img.src = `data/icons/${node.icon}`;
+          img.alt = node ? node.name : id;
+          pill.appendChild(img);
+        }
+        pill.appendChild(elText("span", node ? node.name : id));
         pill.addEventListener("click", () => {
           if (navigateToNode) navigateToNode(id);
         });
@@ -656,6 +997,8 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
     }
     filterState.edgeMode = "construction";
     filterState.showFiltered = false;
+    filterState.buildingStates.clear();
+    filterState.buildingStates.set("world_map", "built"); // always built
     filterState.resourceStates.clear();
     filterState.recipeStates.clear();
 
@@ -683,9 +1026,10 @@ export function focusSearch() {
  * Pure filter function. Returns filtered { nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdges }.
  * @param {Map<string, Object>} fullNodes
  * @param {import('../types.js').GraphEdge[]} fullEdges
+ * @param {Set<string>|null} [whatIfNodeIds] - optional set of what-if node IDs to include in focus chain and city buildability
  * @returns {{ nodes: Map<string, Object>, edges: import('../types.js').GraphEdge[], layoutEdges: import('../types.js').GraphEdge[], filteredOutNodes: Map<string, {node: Object, reason: string, filterType: string}>, filteredOutEdges: import('../types.js').GraphEdge[] }}
  */
-export function applyFilters(fullNodes, fullEdges) {
+export function applyFilters(fullNodes, fullEdges, whatIfNodeIds) {
   const visibleNodeIds = new Set();
   const nodes = new Map();
   const filteredOutNodes = new Map(); // nodeId → {node, reason, filterType}
@@ -712,6 +1056,10 @@ export function applyFilters(fullNodes, fullEdges) {
   if (filterState.focusMode) {
     const { targetId, upstreamDepth, downstreamDepth } = filterState.focusMode;
     const chainIds = computeFocusChain(targetId, upstreamDepth, downstreamDepth, fullNodes, fullEdges);
+    // Include what-if nodes in the focus chain so they aren't filtered out
+    if (whatIfNodeIds) {
+      for (const id of whatIfNodeIds) chainIds.add(id);
+    }
     // Remove nodes not in the focus chain
     for (const id of [...visibleNodeIds]) {
       if (!chainIds.has(id)) {
@@ -723,10 +1071,81 @@ export function applyFilters(fullNodes, fullEdges) {
     }
   }
 
+  // Step 1.5: City buildability filter (only when a city is active)
+  let availableResources = null;
+  let frontierResources = null;
+  if (getActiveCityId()) {
+    availableResources = getAvailableResources(fullNodes, fullEdges);
+    const buildableNotBuilt = new Set();
+
+    // Filter buildings by buildability
+    for (const [id, node] of [...nodes]) {
+      if (node.type !== "building") continue;
+      const bState = filterState.buildingStates.get(id);
+      if (bState === "built") continue; // keep
+      if (bState === "ignored") continue; // handled in step 2
+      // No construction costs = always buildable
+      if (!node.constructionCosts || node.constructionCosts.length === 0) {
+        buildableNotBuilt.add(id);
+        continue;
+      }
+      // What-if buildings bypass the buildability check — treat as buildable-not-built
+      if (whatIfNodeIds && whatIfNodeIds.has(id)) {
+        buildableNotBuilt.add(id);
+        continue;
+      }
+      const missingCosts = node.constructionCosts.filter(c => !availableResources.has(c.resource));
+      if (missingCosts.length === 0) {
+        buildableNotBuilt.add(id);
+      } else {
+        const names = missingCosts.map(c => {
+          const n = fullNodes.get(c.resource);
+          return n ? n.name : c.resource;
+        });
+        nodes.delete(id);
+        visibleNodeIds.delete(id);
+        filteredOutNodes.set(id, { node, reason: `Needs: ${names.join(", ")}`, filterType: "buildability" });
+      }
+    }
+
+    // Collect frontier resources: outputs of buildable-not-built buildings
+    frontierResources = new Set();
+    for (const bId of buildableNotBuilt) {
+      for (const e of fullEdges) {
+        if (e.from === bId && e.direction === "output") {
+          frontierResources.add(e.to);
+        }
+      }
+    }
+
+    // Filter resources by availability/frontier
+    for (const [id, node] of [...nodes]) {
+      if (node.type !== "resource") continue;
+      const rState = filterState.resourceStates.get(id);
+      if (rState === "bought" || rState === "ignored") continue; // user-set, handled later
+      if (availableResources.has(id)) continue; // available
+      if (frontierResources.has(id)) continue; // frontier
+      if (whatIfNodeIds && whatIfNodeIds.has(id)) continue; // what-if resource
+      nodes.delete(id);
+      visibleNodeIds.delete(id);
+      filteredOutNodes.set(id, { node, reason: "Not yet reachable", filterType: "buildability" });
+    }
+  }
+
   // Snapshot category-visible ids before bought/ignored removal (used for orphan pruning baseline)
   const categoryVisibleIds = new Set(visibleNodeIds);
 
-  // Step 2: Hide ignored resources
+  // Step 2: Hide ignored buildings
+  for (const [id, state] of filterState.buildingStates) {
+    if (state === "ignored") {
+      nodes.delete(id);
+      visibleNodeIds.delete(id);
+      const node = fullNodes.get(id);
+      if (node) filteredOutNodes.set(id, { node, reason: "Ignored", filterType: "ignored" });
+    }
+  }
+
+  // Step 2b: Hide ignored resources
   const ignoredResources = new Set();
   for (const [id, state] of filterState.resourceStates) {
     if (state === "ignored") {
@@ -738,7 +1157,7 @@ export function applyFilters(fullNodes, fullEdges) {
     }
   }
 
-  // Step 2b: Hide buildings that require an ignored resource for construction
+  // Step 2c: Hide buildings that require an ignored resource for construction
   if (ignoredResources.size > 0) {
     for (const [id, node] of [...nodes]) {
       if (node.type !== "building" || !node.constructionCosts) continue;
@@ -748,6 +1167,34 @@ export function applyFilters(fullNodes, fullEdges) {
         visibleNodeIds.delete(id);
         const resName = fullNodes.get(ignoredRes.resource)?.name || ignoredRes.resource;
         filteredOutNodes.set(id, { node, reason: `Requires ignored resource: ${resName}`, filterType: "cascaded" });
+      }
+    }
+  }
+
+  // Step 2d: Hide non-built buildings whose ALL recipe outputs are bought
+  // (buying everything a building produces makes it pointless — hide regardless of edge mode)
+  const boughtSet = new Set();
+  for (const [id, state] of filterState.resourceStates) {
+    if (state === "bought") boughtSet.add(id);
+  }
+  if (boughtSet.size > 0) {
+    // Build map: buildingId → Set of output resource IDs across all recipes
+    const buildingOutputs = new Map();
+    for (const e of fullEdges) {
+      if (e.direction !== "output" || !e.recipeId) continue;
+      const fromNode = fullNodes.get(e.from);
+      if (!fromNode || fromNode.type !== "building") continue;
+      if (!buildingOutputs.has(e.from)) buildingOutputs.set(e.from, new Set());
+      buildingOutputs.get(e.from).add(e.to);
+    }
+    for (const [bldId, outputs] of buildingOutputs) {
+      if (!visibleNodeIds.has(bldId)) continue;
+      if (filterState.buildingStates.get(bldId) === "built") continue; // user marked built, keep
+      if (outputs.size > 0 && [...outputs].every(r => boughtSet.has(r))) {
+        const node = nodes.get(bldId);
+        nodes.delete(bldId);
+        visibleNodeIds.delete(bldId);
+        if (node) filteredOutNodes.set(bldId, { node, reason: "All outputs are bought", filterType: "bought" });
       }
     }
   }
@@ -772,10 +1219,7 @@ export function applyFilters(fullNodes, fullEdges) {
   }
 
   // Step 4: Filter edges
-  const boughtSet = new Set();
-  for (const [id, state] of filterState.resourceStates) {
-    if (state === "bought") boughtSet.add(id);
-  }
+  // (boughtSet already computed in Step 2d)
 
   // Find recipes where ALL outputs go to bought resources — suppress entire recipe
   if (boughtSet.size > 0) {

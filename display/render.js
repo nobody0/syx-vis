@@ -2,7 +2,7 @@
 import { Application, Container, Graphics, Text, Sprite, Assets } from "pixi.js";
 import { buildGraph } from "../derive/graph.js";
 import { computeLayout, bezierMidpoint, COL_SPACING, ROW_SPACING, BAND_GAP } from "../derive/layout.js";
-import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode } from "./filters.js";
+import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode, setBuildingState, getBuildingState, getAvailableResources, getCities, getActiveCityId, getActiveCityName, createCity, deleteCity, renameCity, switchCity, deactivateCity } from "./filters.js";
 import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAND_COLORS, capitalize } from "./config.js";
 import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, DASH_PATTERNS, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
 import { createZoomController } from "./pixi-zoom.js";
@@ -59,6 +59,15 @@ let currentLayoutPositions = null;
 // Filtered-out nodes for hidden-link detection
 let currentFilteredOutNodes = new Map();
 
+// City mode derived sets (recomputed each filter change)
+let availableResources = null;
+let frontierResources = null;
+
+// What-if preview sets (focus on buildable-not-built building in city mode)
+let whatIfResources = null;   // Set<string> of resource IDs that would become available
+let whatIfBuildings = null;   // Set<string> of building IDs that would become buildable
+let whatIfUpgrades = null;    // Set<string> of building IDs that would gain a new upgrade tier
+
 // Breadcrumb state
 const MAX_BREADCRUMBS = 8;
 let breadcrumbHistory = [];
@@ -87,6 +96,102 @@ let edgeLabelsCreated = false;
 // Stats bar counts (for re-rendering on selection change)
 let lastNodeCount = 0;
 let lastEdgeCount = 0;
+
+// ══════════════════════════════════════════════════════════
+// City mode helpers
+// ══════════════════════════════════════════════════════════
+
+function recomputeCitySets() {
+  if (getActiveCityId() && fullNodes && fullEdges) {
+    availableResources = getAvailableResources(fullNodes, fullEdges);
+    // Frontier: outputs of buildable-not-built buildings
+    frontierResources = new Set();
+    for (const [id, node] of fullNodes) {
+      if (node.type !== "building") continue;
+      const bState = getBuildingState(id);
+      if (bState === "built" || bState === "ignored") continue;
+      // Check if buildable
+      if (!node.constructionCosts || node.constructionCosts.length === 0 ||
+          node.constructionCosts.every(c => availableResources.has(c.resource))) {
+        for (const e of fullEdges) {
+          if (e.from === id && e.direction === "output") {
+            frontierResources.add(e.to);
+          }
+        }
+      }
+    }
+    // ── What-if preview: focus on a buildable-not-built building ──
+    whatIfResources = null;
+    whatIfBuildings = null;
+    whatIfUpgrades = null;
+    const focus = getFocusMode();
+    if (focus) {
+      const targetNode = fullNodes.get(focus.targetId);
+      if (targetNode && targetNode.type === "building") {
+        const bState = getBuildingState(focus.targetId);
+        if (bState !== "built" && bState !== "ignored") {
+          // Check if buildable (all construction costs available)
+          const buildable = !targetNode.constructionCosts ||
+            targetNode.constructionCosts.length === 0 ||
+            targetNode.constructionCosts.every(c => availableResources.has(c.resource));
+          if (buildable) {
+            // Compute temp available: current available + focused building's outputs
+            const tempAvailable = new Set(availableResources);
+            for (const e of fullEdges) {
+              if (e.from === focus.targetId && e.direction === "output") {
+                tempAvailable.add(e.to);
+              }
+            }
+            // What-if resources = new resources not already available
+            const wiRes = new Set();
+            for (const r of tempAvailable) {
+              if (!availableResources.has(r)) wiRes.add(r);
+            }
+            // What-if buildings: newly constructable OR newly upgradeable
+            const wiBld = new Set();
+            const wiUpgrade = new Set(); // buildings that gain a new upgrade tier
+            for (const [id, node] of fullNodes) {
+              if (node.type !== "building") continue;
+              if (id === focus.targetId) continue;
+              const bs = getBuildingState(id);
+              if (bs === "ignored") continue;
+
+              // Check construction unlock (not-yet-built buildings)
+              if (bs !== "built" && node.constructionCosts && node.constructionCosts.length > 0) {
+                const wasBuildable = node.constructionCosts.every(c => availableResources.has(c.resource));
+                if (!wasBuildable) {
+                  const isBuildableNow = node.constructionCosts.every(c => tempAvailable.has(c.resource));
+                  if (isBuildableNow) wiBld.add(id);
+                }
+              }
+
+              // Check upgrade unlock (any building with upgrade tiers)
+              if (node.upgradeCosts && node.upgradeCosts.length > 0) {
+                for (const tierCosts of node.upgradeCosts) {
+                  const wasAffordable = tierCosts.every(c => availableResources.has(c.resource));
+                  if (wasAffordable) continue;
+                  const isAffordableNow = tierCosts.every(c => tempAvailable.has(c.resource));
+                  if (isAffordableNow) { wiUpgrade.add(id); break; }
+                }
+              }
+            }
+            if (wiRes.size > 0 || wiBld.size > 0 || wiUpgrade.size > 0) {
+              whatIfResources = wiRes;
+              whatIfBuildings = wiBld;
+              whatIfUpgrades = wiUpgrade;
+            }
+          }
+        }
+      }
+    }
+  } else {
+    availableResources = null;
+    frontierResources = null;
+    whatIfResources = null;
+    whatIfBuildings = null;
+    whatIfUpgrades = null;
+  }
+}
 
 // ══════════════════════════════════════════════════════════
 // BFS chain highlighting (pure data)
@@ -183,13 +288,13 @@ function applyDirectionalHighlight(chain) {
     } else if (directNeighbors.has(id)) {
       // Direct neighbor via non-BFS edge — keep visible
       gfx.alpha = 1;
-      redrawNodeStroke(strokeGfx, data, 0x000000, 1.5, 0.35);
+      redrawNodeStateStroke(strokeGfx, data);
     } else if (!allHighlightedNodes.has(id) && !inFocus) {
       gfx.alpha = 0.08;
       redrawNodeStroke(strokeGfx, data, 0x000000, 1.5, 0.3);
     } else {
       gfx.alpha = 1;
-      redrawNodeStroke(strokeGfx, data, 0x000000, 1.5, 0.35);
+      redrawNodeStateStroke(strokeGfx, data);
     }
   }
 
@@ -252,7 +357,7 @@ function clearHighlight() {
 
   for (const [, entry] of nodeGfxMap) {
     entry.gfx.alpha = 1;
-    redrawNodeStroke(entry.strokeGfx, entry.data, 0x000000, 1.5, 0.35);
+    redrawNodeStateStroke(entry.strokeGfx, entry.data);
   }
 
   for (const [, entry] of edgeGfxMap) {
@@ -274,6 +379,73 @@ function restoreBaseState() {
 }
 
 // ── Redraw helpers ──
+
+/** Restore the appropriate state-based stroke for a node (built/bought/available/default). */
+function redrawNodeStateStroke(strokeGfx, data) {
+  const bState = data.type === "building" ? getBuildingState(data.id) : null;
+  const rState = data.type === "resource" ? getResourceState(data.id) : null;
+  const cityActive = !!getActiveCityId();
+  const isAvail = data.type === "resource" && cityActive && availableResources && availableResources.has(data.id);
+
+  if (bState === "built" && !(whatIfUpgrades && whatIfUpgrades.has(data.id))) {
+    strokeGfx.clear();
+    strokeGfx.setStrokeStyle({ width: 2.5, color: 0x6cc060, alpha: 1 });
+    strokeGfx.roundRect(-BUILDING_W / 2, -BUILDING_H / 2, BUILDING_W, BUILDING_H, 6);
+    strokeGfx.stroke();
+  } else if (rState === "bought") {
+    strokeGfx.clear();
+    strokeGfx.setStrokeStyle({ width: 2, color: 0xb88420, alpha: 1 });
+    const circlePoints = [];
+    for (let a = 0; a <= Math.PI * 2; a += Math.PI / 40) {
+      circlePoints.push({ x: Math.cos(a) * RESOURCE_R, y: Math.sin(a) * RESOURCE_R });
+    }
+    drawDashedCurve(strokeGfx, circlePoints, [4, 2]);
+    strokeGfx.stroke();
+  } else if (isAvail) {
+    strokeGfx.clear();
+    strokeGfx.setStrokeStyle({ width: 2.5, color: 0x6cc060, alpha: 1 });
+    strokeGfx.circle(0, 0, RESOURCE_R);
+    strokeGfx.stroke();
+  } else if (isWhatIfNode(data.id)) {
+    redrawWhatIfStroke(strokeGfx, data);
+  } else {
+    redrawNodeStroke(strokeGfx, data, 0x000000, 1.5, 0.35);
+  }
+}
+
+/** Check if a node is part of the what-if preview. */
+function isWhatIfNode(id) {
+  return (whatIfResources && whatIfResources.has(id)) ||
+    (whatIfBuildings && whatIfBuildings.has(id)) ||
+    (whatIfUpgrades && whatIfUpgrades.has(id));
+}
+
+/** Draw dashed cyan stroke for what-if preview nodes. */
+function redrawWhatIfStroke(strokeGfx, data) {
+  strokeGfx.clear();
+  strokeGfx.setStrokeStyle({ width: 2, color: 0x4fc3f7, alpha: 0.85 });
+  if (data.type === "resource") {
+    const circlePoints = [];
+    for (let a = 0; a <= Math.PI * 2; a += Math.PI / 40) {
+      circlePoints.push({ x: Math.cos(a) * RESOURCE_R, y: Math.sin(a) * RESOURCE_R });
+    }
+    drawDashedCurve(strokeGfx, circlePoints, [6, 3]);
+  } else {
+    const hw = BUILDING_W / 2, hh = BUILDING_H / 2;
+    const rectPoints = [];
+    const r = 6;
+    const steps = 8;
+    for (let i = 0; i <= steps; i++) { const a = -Math.PI / 2 + (Math.PI / 2) * (i / steps); rectPoints.push({ x: hw - r + Math.cos(a) * r, y: -hh + r + Math.sin(a) * r }); }
+    rectPoints.push({ x: hw, y: hh - r });
+    for (let i = 0; i <= steps; i++) { const a = 0 + (Math.PI / 2) * (i / steps); rectPoints.push({ x: hw - r + Math.cos(a) * r, y: hh - r + Math.sin(a) * r }); }
+    rectPoints.push({ x: -hw + r, y: hh });
+    for (let i = 0; i <= steps; i++) { const a = Math.PI / 2 + (Math.PI / 2) * (i / steps); rectPoints.push({ x: -hw + r + Math.cos(a) * r, y: hh - r + Math.sin(a) * r }); }
+    rectPoints.push({ x: -hw, y: -hh + r });
+    for (let i = 0; i <= steps; i++) { const a = Math.PI + (Math.PI / 2) * (i / steps); rectPoints.push({ x: -hw + r + Math.cos(a) * r, y: -hh + r + Math.sin(a) * r }); }
+    drawDashedCurve(strokeGfx, rectPoints, [6, 3]);
+  }
+  strokeGfx.stroke();
+}
 
 function redrawNodeStroke(strokeGfx, data, color, width, alpha = 1) {
   strokeGfx.clear();
@@ -568,6 +740,29 @@ function renderFocusBar(targetId, upstreamDepth, downstreamDepth) {
 
 function removeFocusBar() {
   if (focusBarEl) { focusBarEl.remove(); focusBarEl = null; }
+}
+
+function updateFocusBarWhatIf() {
+  if (!focusBarEl) return;
+  // Remove existing what-if indicator if any
+  const existing = focusBarEl.querySelector(".focus-bar-whatif");
+  if (existing) existing.remove();
+  // Add indicator if what-if sets are non-empty
+  if (whatIfResources || whatIfBuildings || whatIfUpgrades) {
+    const resCount = whatIfResources ? whatIfResources.size : 0;
+    const bldCount = whatIfBuildings ? whatIfBuildings.size : 0;
+    const upgCount = whatIfUpgrades ? whatIfUpgrades.size : 0;
+    if (resCount > 0 || bldCount > 0 || upgCount > 0) {
+      const parts = [];
+      if (bldCount > 0) parts.push(`${bldCount} building${bldCount > 1 ? "s" : ""}`);
+      if (upgCount > 0) parts.push(`${upgCount} upgrade${upgCount > 1 ? "s" : ""}`);
+      if (resCount > 0) parts.push(`${resCount} resource${resCount > 1 ? "s" : ""}`);
+      const span = document.createElement("span");
+      span.className = "focus-bar-whatif";
+      span.textContent = `Would unlock: ${parts.join(", ")}`;
+      focusBarEl.appendChild(span);
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1402,7 +1597,19 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
     // Stroke overlay (separate Graphics for highlight updates)
     const strokeGfx = new Graphics();
     const rState = d.type === "resource" ? getResourceState(d.id) : null;
-    if (rState === "bought") {
+    const bState = d.type === "building" ? getBuildingState(d.id) : null;
+    // Compute available resources for green ring on derived availability
+    const cityActive = !!getActiveCityId();
+    const isResourceAvailable = d.type === "resource" && cityActive && availableResources && availableResources.has(d.id);
+    const isFrontier = d.type === "resource" && cityActive && frontierResources && frontierResources.has(d.id) && !isResourceAvailable;
+    const isWhatIf = isWhatIfNode(d.id);
+
+    if (bState === "built" && !(whatIfUpgrades && whatIfUpgrades.has(d.id))) {
+      // Green stroke for built buildings (unless upgrade what-if takes priority)
+      strokeGfx.setStrokeStyle({ width: 2.5, color: 0x6cc060, alpha: 1 });
+      strokeGfx.roundRect(-BUILDING_W / 2, -BUILDING_H / 2, BUILDING_W, BUILDING_H, 6);
+      strokeGfx.stroke();
+    } else if (rState === "bought") {
       // Dashed stroke for bought resources
       strokeGfx.setStrokeStyle({ width: 2, color: 0xb88420, alpha: 1 });
       const circlePoints = [];
@@ -1411,14 +1618,23 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       }
       drawDashedCurve(strokeGfx, circlePoints, [4, 2]);
       strokeGfx.stroke();
-    } else if (rState === "produced") {
+    } else if (isResourceAvailable) {
+      // Green ring for available resources (derived from built buildings)
       strokeGfx.setStrokeStyle({ width: 2.5, color: 0x6cc060, alpha: 1 });
       strokeGfx.circle(0, 0, RESOURCE_R);
       strokeGfx.stroke();
+    } else if (isWhatIf) {
+      // Dashed cyan stroke for what-if preview nodes
+      redrawWhatIfStroke(strokeGfx, d);
     } else {
       redrawNodeStroke(strokeGfx, d, 0x000000, 1.5, 0.35);
     }
     nodeContainer.addChild(strokeGfx);
+
+    // Frontier resources get dimmed alpha
+    if (isFrontier) {
+      nodeContainer.alpha = 0.55;
+    }
 
     // Icon sprite
     if (d.icon) {
@@ -1467,12 +1683,13 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
     }
     nodeContainer.addChild(nameText);
 
-    // State sublabel for bought/produced
+    // State sublabel for bought/available resources and built buildings
     if (d.type === "resource") {
       const rState2 = getResourceState(d.id);
-      if (rState2 === "bought" || rState2 === "produced") {
+      const showAvailable = !rState2 && isResourceAvailable;
+      if (rState2 === "bought" || showAvailable) {
         const sublabel = new Text({
-          text: rState2 === "bought" ? "bought" : "producing",
+          text: rState2 === "bought" ? "bought" : "available",
           style: {
             fontFamily: '"DM Sans", "Segoe UI", system-ui, sans-serif',
             fontSize: 9,
@@ -1487,7 +1704,79 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
         sublabel.position.set(0, d.icon ? RESOURCE_R + 20 : 14);
         sublabel.alpha = 0.8;
         nodeContainer.addChild(sublabel);
+      } else if (isFrontier) {
+        const sublabel = new Text({
+          text: "frontier",
+          style: {
+            fontFamily: '"DM Sans", "Segoe UI", system-ui, sans-serif',
+            fontSize: 9,
+            fontStyle: "italic",
+            fill: "#807568",
+            align: "center",
+          },
+        });
+        sublabel.resolution = window.devicePixelRatio || 1;
+        sublabel.anchor.set(0.5, 0);
+        sublabel.eventMode = "none";
+        sublabel.position.set(0, d.icon ? RESOURCE_R + 20 : 14);
+        sublabel.alpha = 0.6;
+        nodeContainer.addChild(sublabel);
+      } else if (isWhatIf) {
+        const sublabel = new Text({
+          text: "would unlock",
+          style: {
+            fontFamily: '"DM Sans", "Segoe UI", system-ui, sans-serif',
+            fontSize: 9,
+            fontStyle: "italic",
+            fill: "#4fc3f7",
+            align: "center",
+          },
+        });
+        sublabel.resolution = window.devicePixelRatio || 1;
+        sublabel.anchor.set(0.5, 0);
+        sublabel.eventMode = "none";
+        sublabel.position.set(0, d.icon ? RESOURCE_R + 20 : 14);
+        sublabel.alpha = 0.85;
+        nodeContainer.addChild(sublabel);
       }
+    }
+    if (d.type === "building" && isWhatIf) {
+      const isUpgradeOnly = whatIfUpgrades && whatIfUpgrades.has(d.id) &&
+        !(whatIfBuildings && whatIfBuildings.has(d.id));
+      const sublabel = new Text({
+        text: isUpgradeOnly ? "would unlock upgrade" : "would unlock",
+        style: {
+          fontFamily: '"DM Sans", "Segoe UI", system-ui, sans-serif',
+          fontSize: 9,
+          fontStyle: "italic",
+          fill: "#4fc3f7",
+          align: "center",
+        },
+      });
+      sublabel.resolution = window.devicePixelRatio || 1;
+      sublabel.anchor.set(0.5, 0);
+      sublabel.eventMode = "none";
+      sublabel.position.set(0, BUILDING_H / 2 + 4);
+      sublabel.alpha = 0.85;
+      nodeContainer.addChild(sublabel);
+    }
+    if (d.type === "building" && bState === "built" && !isWhatIf) {
+      const sublabel = new Text({
+        text: "built",
+        style: {
+          fontFamily: '"DM Sans", "Segoe UI", system-ui, sans-serif',
+          fontSize: 9,
+          fontStyle: "italic",
+          fill: "#6cc060",
+          align: "center",
+        },
+      });
+      sublabel.resolution = window.devicePixelRatio || 1;
+      sublabel.anchor.set(0.5, 0);
+      sublabel.eventMode = "none";
+      sublabel.position.set(0, BUILDING_H / 2 + 4);
+      sublabel.alpha = 0.8;
+      nodeContainer.addChild(sublabel);
     }
 
     // ── Node interactions ──
@@ -1614,6 +1903,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       zoomCtrl.zoomToFit(bbox, 60, false);
     }
   }
+  updateFocusBarWhatIf();
   restoreBaseState();
 }
 
@@ -2029,6 +2319,33 @@ function openDetailForNode(d) {
     .attr("title", "Show only this node's dependency chain (F)")
     .on("click", () => enterFocusMode(d.id));
 
+  // Building state buttons (Built / Ignored) — World Map is always built, no toggle
+  if (d.type === "building" && d.id !== "world_map") {
+    const bStateRow = panel.append("div").attr("class", "detail-state-row");
+    const bStateOptions = [
+      { key: "built", label: "Built", tooltip: "Mark as built \u2014 its recipe outputs become available resources" },
+      { key: "ignored", label: "Ignored", tooltip: "Hide this building from the graph" },
+    ];
+    const bStateBtns = [];
+    for (const opt of bStateOptions) {
+      const btn = bStateRow.append("button")
+        .attr("class", `detail-state-btn state-${opt.key}`)
+        .classed("active", getBuildingState(d.id) === opt.key)
+        .on("click", () => {
+          const current = getBuildingState(d.id);
+          if (current === opt.key) setBuildingState(d.id, null);
+          else setBuildingState(d.id, opt.key);
+          for (const b of bStateBtns) b.classed("active", getBuildingState(d.id) === b.datum());
+          refreshResourceGrid();
+          fireFilterChange();
+        });
+      btn.text(opt.label);
+      btn.append("span").attr("class", "state-tooltip").text(opt.tooltip);
+      btn.datum(opt.key);
+      bStateBtns.push(btn);
+    }
+  }
+
   if (d.type === "building" && d.recipes) {
     const metaItems = [];
     if (d.storage != null) metaItems.push(`Storage: ${d.storage}`);
@@ -2176,10 +2493,28 @@ function openDetailForNode(d) {
 
     const buildCosts = fullEdges.filter(e => e.to === d.id && e.direction === "construction");
     if (buildCosts.length > 0) {
-      panel.append("h3").text(`Construction Costs (${buildCosts.length})`);
+      const costAvail = availableResources;
+      const allAvailable = costAvail && buildCosts.every(c => costAvail.has(c.from));
+      const costHeader = panel.append("h3");
+      costHeader.text(`Construction Costs (${buildCosts.length})`);
+      if (costAvail) {
+        if (allAvailable) {
+          costHeader.append("span").attr("class", "cost-status cost-ready").text(" Ready");
+        } else {
+          const missing = buildCosts.filter(c => !costAvail.has(c.from))
+            .map(c => findName(fullNodes, c.from));
+          costHeader.append("span").attr("class", "cost-status cost-missing")
+            .text(` Needs: ${missing.join(", ")}`);
+        }
+      }
       const costUl = panel.append("ul");
       for (const c of buildCosts) {
         const li = costUl.append("li");
+        if (costAvail) {
+          const marker = costAvail.has(c.from) ? "\u2713" : "\u2717";
+          const cls = costAvail.has(c.from) ? "cost-check" : "cost-x";
+          li.append("span").attr("class", cls).text(marker + " ");
+        }
         appendResourceIcon(li, c.from);
         createNavLink(li, c.from, findName(fullNodes, c.from));
         li.append("span").text(` ${formatQuantity(c.amount)}`);
@@ -2321,7 +2656,6 @@ function openDetailForNode(d) {
     const stateRow = panel.append("div").attr("class", "detail-state-row");
     const stateOptions = [
       { key: "bought", label: "Bought", tooltip: "We buy this externally \u2014 hides its producers since we don't need to make it" },
-      { key: "produced", label: "Producing", tooltip: "We produce this ourselves \u2014 shows the full production chain" },
       { key: "ignored", label: "Ignored", tooltip: "We don't use this at all \u2014 hides everything related to it" },
     ];
     const stateBtns = [];
@@ -2341,6 +2675,56 @@ function openDetailForNode(d) {
       btn.append("span").attr("class", "state-tooltip").text(opt.tooltip);
       btn.datum(opt.key);
       stateBtns.push(btn);
+    }
+
+    // Derived availability status (city mode)
+    if (availableResources) {
+      const isAvail = availableResources.has(d.id);
+      const rState3 = getResourceState(d.id);
+      if (rState3 !== "bought" && rState3 !== "ignored") {
+        if (isAvail) {
+          // Find which built building produces this
+          const builtProducers = fullEdges.filter(e =>
+            e.to === d.id && e.direction === "output" && getBuildingState(e.from) === "built" && getRecipeWeight(e.recipeId) > 0
+          );
+          const statusDiv = panel.append("div").attr("class", "resource-availability available");
+          if (builtProducers.length > 0) {
+            statusDiv.append("span").text("Produced by: ");
+            for (let pi = 0; pi < builtProducers.length; pi++) {
+              if (pi > 0) statusDiv.append("span").text(", ");
+              const bld = fullNodes.get(builtProducers[pi].from);
+              if (bld) {
+                createNavLink(statusDiv, builtProducers[pi].from, bld.name, { bold: true });
+              }
+            }
+          } else {
+            statusDiv.text("Available (bought or base resource)");
+          }
+        } else {
+          // Show which buildable buildings would produce this
+          const potentialProducers = fullEdges.filter(e => {
+            if (e.to !== d.id || e.direction !== "output") return false;
+            const node = fullNodes.get(e.from);
+            if (!node || node.type !== "building") return false;
+            const bs = getBuildingState(e.from);
+            if (bs === "built" || bs === "ignored") return false;
+            if (!node.constructionCosts || node.constructionCosts.length === 0) return true;
+            return node.constructionCosts.every(c => availableResources.has(c.resource));
+          });
+          if (potentialProducers.length > 0) {
+            const hintDiv = panel.append("div").attr("class", "resource-availability hint");
+            hintDiv.append("span").text("Would be produced by: ");
+            for (let pi = 0; pi < potentialProducers.length; pi++) {
+              if (pi > 0) hintDiv.append("span").text(", ");
+              const bld = fullNodes.get(potentialProducers[pi].from);
+              if (bld) createNavLink(hintDiv, potentialProducers[pi].from, bld.name, { bold: true });
+            }
+          } else {
+            panel.append("div").attr("class", "resource-availability not-available")
+              .text("Not yet produced");
+          }
+        }
+      }
     }
 
     const producers = fullEdges.filter(e => e.to === d.id && e.direction === "output");
@@ -2498,6 +2882,90 @@ function findName(nodes, id) {
 }
 
 // ══════════════════════════════════════════════════════════
+// City selector
+// ══════════════════════════════════════════════════════════
+
+function buildCitySelector(onFilterChange) {
+  const container = document.getElementById("city-selector");
+  container.innerHTML = "";
+
+  const cities = getCities();
+  const activeCityId = getActiveCityId();
+
+  // Select dropdown
+  const select = document.createElement("select");
+  select.className = "city-select";
+
+  const exploreOpt = document.createElement("option");
+  exploreOpt.value = "";
+  exploreOpt.textContent = "-- Explore --";
+  if (!activeCityId) exploreOpt.selected = true;
+  select.appendChild(exploreOpt);
+
+  for (const city of cities) {
+    const opt = document.createElement("option");
+    opt.value = city.id;
+    opt.textContent = city.name;
+    if (city.id === activeCityId) opt.selected = true;
+    select.appendChild(opt);
+  }
+
+  select.addEventListener("change", () => {
+    if (select.value) {
+      switchCity(select.value);
+    } else {
+      deactivateCity();
+    }
+    buildCitySelector(onFilterChange);
+    onFilterChange();
+  });
+  container.appendChild(select);
+
+  // New city button
+  const addBtn = document.createElement("button");
+  addBtn.className = "city-btn city-add-btn";
+  addBtn.textContent = "+";
+  addBtn.title = "Create new city";
+  addBtn.addEventListener("click", () => {
+    const name = prompt("City name:");
+    if (!name || !name.trim()) return;
+    createCity(name.trim());
+    buildCitySelector(onFilterChange);
+    onFilterChange();
+  });
+  container.appendChild(addBtn);
+
+  // Rename/delete only when city is active
+  if (activeCityId) {
+    const renameBtn = document.createElement("button");
+    renameBtn.className = "city-btn";
+    renameBtn.textContent = "\u270E";
+    renameBtn.title = "Rename city";
+    renameBtn.addEventListener("click", () => {
+      const current = getActiveCityName();
+      const name = prompt("Rename city:", current || "");
+      if (!name || !name.trim()) return;
+      renameCity(activeCityId, name.trim());
+      buildCitySelector(onFilterChange);
+    });
+    container.appendChild(renameBtn);
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "city-btn city-del-btn";
+    delBtn.textContent = "\u2715";
+    delBtn.title = "Delete city";
+    delBtn.addEventListener("click", () => {
+      const cityName = getActiveCityName();
+      if (!confirm(`Delete city "${cityName}"?`)) return;
+      deleteCity(activeCityId);
+      buildCitySelector(onFilterChange);
+      onFilterChange();
+    });
+    container.appendChild(delBtn);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
 // First-visit onboarding
 // ══════════════════════════════════════════════════════════
 
@@ -2590,13 +3058,22 @@ export async function render() {
   fullLayoutPositions = computeLayout(nodes, allEdges, allEdges);
 
   const onFilterChange = () => {
-    const { nodes: filteredNodes, edges: filteredEdges, layoutEdges, filteredOutNodes, filteredOutEdges } = applyFilters(fullNodes, fullEdges);
+    recomputeCitySets();
+    const hasWhatIf = whatIfResources || whatIfBuildings || whatIfUpgrades;
+    const whatIfIds = hasWhatIf
+      ? new Set([...(whatIfResources || []), ...(whatIfBuildings || []), ...(whatIfUpgrades || [])])
+      : null;
+    const { nodes: filteredNodes, edges: filteredEdges, layoutEdges, filteredOutNodes, filteredOutEdges } = applyFilters(fullNodes, fullEdges, whatIfIds);
     updateGraph(filteredNodes, filteredEdges, layoutEdges, filteredOutNodes, filteredOutEdges);
+    // Rebuild city selector to reflect state changes
+    buildCitySelector(onFilterChange);
   };
 
+  buildCitySelector(onFilterChange);
   buildFilterPanel(fullNodes, fullEdges, onFilterChange, (id) => navigateToNode(id));
 
   // Initial render
+  recomputeCitySets();
   const initial = applyFilters(fullNodes, fullEdges);
   updateGraph(initial.nodes, initial.edges, initial.layoutEdges, initial.filteredOutNodes, initial.filteredOutEdges);
 

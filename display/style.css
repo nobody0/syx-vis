@@ -1065,6 +1065,12 @@ body::after {
   background: rgba(200, 160, 64, 0.12);
   box-shadow: 0 0 10px rgba(200, 160, 64, 0.08);
 }
+.detail-state-btn.active.state-built {
+  border-color: var(--state-produced);
+  color: var(--state-produced);
+  background: rgba(96, 184, 88, 0.12);
+  box-shadow: 0 0 10px rgba(96, 184, 88, 0.08);
+}
 .detail-state-btn.active.state-produced {
   border-color: var(--state-produced);
   color: var(--state-produced);
@@ -2174,6 +2180,7 @@ body:has(.view.active:not(#view-graph)) .zoom-controls { display: none; }
   letter-spacing: 0.5px;
   margin-bottom: 2px;
 }
+.active-states-group-label.state-built { color: var(--state-produced); }
 .active-states-group-label.state-bought { color: var(--state-bought); }
 .active-states-group-label.state-produced { color: var(--state-produced); }
 .active-states-group-label.state-ignored { color: var(--state-ignored); }
@@ -2300,6 +2307,13 @@ body:has(.view.active:not(#view-graph)) .zoom-controls { display: none; }
   color: var(--accent-gold);
   border-color: var(--accent-gold-dim);
   background: var(--accent-gold-glow);
+}
+
+.focus-bar-whatif {
+  color: #4fc3f7;
+  font-size: 0.78rem;
+  font-style: italic;
+  margin-left: 12px;
 }
 
 .focus-depth-ctrl {
@@ -3616,9 +3630,116 @@ body:has(.focus-bar) #breadcrumb-bar {
   color: var(--text-primary);
 }
 
+/* ── City selector ──────────────────────────────────── */
+
+#city-selector {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.city-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border-medium);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 11px;
+  padding: 4px 8px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  max-width: 140px;
+}
+.city-select:focus {
+  border-color: var(--accent-gold-dim);
+  box-shadow: 0 0 0 2px var(--accent-gold-glow);
+}
+.city-select option {
+  background: var(--bg-panel-solid);
+  color: var(--text-primary);
+}
+
+.city-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border-medium);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+.city-btn:hover {
+  border-color: var(--accent-gold-dim);
+  color: var(--accent-gold);
+  background: var(--accent-gold-glow);
+}
+.city-del-btn:hover {
+  border-color: var(--state-ignored);
+  color: var(--state-ignored);
+  background: rgba(176, 104, 64, 0.12);
+}
+
+/* ── Cost availability markers ─────────────────────── */
+
+.cost-check {
+  color: var(--state-produced);
+  font-weight: 700;
+  font-size: 12px;
+}
+.cost-x {
+  color: var(--state-ignored);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.cost-status {
+  font-size: 10px;
+  font-weight: 600;
+  margin-left: 6px;
+  font-style: normal;
+}
+.cost-status.cost-ready {
+  color: var(--state-produced);
+}
+.cost-status.cost-missing {
+  color: var(--state-bought);
+}
+
+/* ── Resource availability status ──────────────────── */
+
+.resource-availability {
+  font-size: 11px;
+  padding: 4px 8px;
+  margin: 4px 0 6px;
+  border-radius: 3px;
+  line-height: 1.5;
+}
+.resource-availability.available {
+  color: var(--state-produced);
+  background: rgba(96, 184, 88, 0.06);
+  border-left: 2px solid var(--state-produced);
+}
+.resource-availability.hint {
+  color: var(--text-secondary);
+  background: rgba(200, 160, 64, 0.06);
+  border-left: 2px solid var(--state-bought);
+}
+.resource-availability.not-available {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* ── Responsive overlap prevention ─────────────────── */
 @media (max-width: 1100px) {
   #stats-bar { display: none; }
+  #city-selector { display: none; }
   .planner-selector { flex-direction: column; align-items: stretch; }
   .planner-actions { flex-wrap: wrap; }
   .planner-main { flex-direction: column; }

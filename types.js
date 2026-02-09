@@ -299,3 +299,12 @@ export {};
  * @property {Fence[]} fences
  * @property {Fortification[]} fortifications
  */
+
+/**
+ * @typedef {Object} CityData
+ * @property {string} id - Unique city ID ("city_<timestamp>")
+ * @property {string} name - User-given city name
+ * @property {Object<string, string>} buildingStates - buildingId → "built"|"ignored"
+ * @property {Object<string, number>} recipeStates - recipeId → weight
+ * @property {Object<string, string>} resourceStates - resourceId → "bought"|"ignored"
+ */
