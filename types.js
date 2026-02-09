@@ -51,6 +51,26 @@ export {};
  */
 
 /**
+ * @typedef {Object} SpriteVariant
+ * @property {boolean} [rotates] - Whether this furniture piece can be rotated
+ * @property {number} [fps] - Animation frames per second (omitted if 0)
+ * @property {number} [shadowLength] - Shadow projection length
+ * @property {number} [shadowHeight] - Shadow height offset
+ * @property {boolean} [tint] - Whether the sprite is tinted
+ * @property {boolean} [circular] - Whether the animation loops circularly
+ * @property {{r: number, g: number, b: number}} [color] - Override color
+ * @property {string[]} [frames] - Sprite frame references (e.g. "CHAIRS: 0")
+ * @property {*} [resources] - Resource references (rare)
+ */
+
+/**
+ * @typedef {Object} Sprite
+ * @property {string} type - Sprite type key (e.g. "CHAIR_1X1", "TABLE_COMBO")
+ * @property {{w: number, h: number}} [size] - Tile size parsed from type name (e.g. {w:1,h:1} from "1X1")
+ * @property {SpriteVariant[]} variants - Visual variants/upgrade tiers
+ */
+
+/**
  * @typedef {Object} Building
  * @property {string} id
  * @property {string} name
@@ -119,6 +139,49 @@ export {};
  * @property {string} [racePreference]
  * @property {{fullDays?: number, boost?: number|Object<string,number>}} [training]
  * @property {string[]} [spriteTypes]
+ * @property {Sprite[]} [sprites]
+ */
+
+/**
+ * @typedef {Object} FurnitureTileType
+ * @property {boolean} [mustBeReachable] - Tile needs an adjacent walkable tile
+ * @property {string} availability - Walkability: ROOM_SOLID, AVOID_PASS, ROOM, SOLID, ENEMY, etc.
+ * @property {boolean} [canGoCandle] - Whether a candle/decoration can be placed on this tile
+ * @property {number} [data] - Usage tag (e.g. 2=storage, 3=fetch, 4=work for workshops)
+ * @property {string} [sprite] - SPRITES key name (e.g. "CHAIR_1X1", "TABLE_COMBO") linking to building sprite data
+ */
+
+/**
+ * @typedef {Object} FurnitureItem
+ * @property {(string|null)[][]} tiles - 2D grid of tile type names (null = empty space)
+ * @property {number} multiplier - Cost/stat multiplier for this item variant
+ * @property {number} [multiplierStats] - Separate stat multiplier (if different from cost multiplier)
+ */
+
+/**
+ * @typedef {Object} FurnitureGroup
+ * @property {number} min - Minimum items from this group that must be placed
+ * @property {number} [max] - Maximum items from this group (null = unlimited)
+ * @property {number} rotations - Rotation mode: 0=none, 1=one axis, 3=full (4-way)
+ * @property {FurnitureItem[]} items - Available furniture piece variants
+ */
+
+/**
+ * @typedef {Object} FurnitureStat
+ * @property {string} name - Field name from Java constructor (e.g. "priests", "workers", "coziness")
+ * @property {"employees"|"services"|"efficiency"|"relative"|"production"|"integer"|"irrigation"|"employeesRelative"|"custom"} type - Stat type category
+ */
+
+/**
+ * @typedef {Object} FurnitureSet
+ * @property {string} id - Constructor type identifier (e.g. "workshop", "canteen")
+ * @property {string[]} buildingIds - Building IDs that use this furniture layout
+ * @property {boolean} [usesArea] - Whether the room uses area-based placement
+ * @property {boolean} [mustBeIndoors] - Whether the room must be indoors
+ * @property {boolean} [mustBeOutdoors] - Whether the room must be outdoors
+ * @property {FurnitureStat[]} [stats] - Stat definitions in index order (maps to Building items[].stats arrays)
+ * @property {Object<string, FurnitureTileType|null>} tileTypes - Tile type definitions (null = empty space)
+ * @property {FurnitureGroup[]} groups - Furniture groups (each group is placed independently)
  */
 
 /**

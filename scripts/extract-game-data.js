@@ -988,6 +988,113 @@ function extractItems(data) {
   return items;
 }
 
+/** Property names that belong to a sprite variant, not a sprite type category */
+const SPRITE_VARIANT_PROPS = new Set([
+  "FPS", "SHADOW_LENGTH", "SHADOW_HEIGHT", "ROTATES", "FRAMES",
+  "TINT", "CIRCULAR", "COLOR", "RESOURCES",
+]);
+
+/**
+ * Parse size info from a sprite type name.
+ * E.g. "CHAIR_1X1" → {w:1,h:1}, "AUX_BIG_2X2" → {w:2,h:2},
+ *      "TABLE_COMBO" → null, "GATE_TOP_3X3" → {w:3,h:3}
+ * @param {string} name
+ * @returns {{w: number, h: number}|null}
+ */
+function parseSpriteSize(name) {
+  const m = name.match(/(\d+)[Xx](\d+)$/);
+  if (m) return { w: Number(m[1]), h: Number(m[2]) };
+  return null;
+}
+
+/**
+ * Extract a single sprite variant object, keeping only gameplay-relevant fields.
+ * @param {Object} entry - Raw parsed sprite variant
+ * @returns {Object}
+ */
+function extractSpriteVariant(entry) {
+  const v = {};
+  if (entry.ROTATES != null) v.rotates = entry.ROTATES;
+  if (entry.FPS != null && entry.FPS !== 0) v.fps = entry.FPS;
+  if (entry.SHADOW_LENGTH != null) v.shadowLength = entry.SHADOW_LENGTH;
+  if (entry.SHADOW_HEIGHT != null) v.shadowHeight = entry.SHADOW_HEIGHT;
+  if (entry.TINT != null) v.tint = entry.TINT;
+  if (entry.CIRCULAR != null) v.circular = entry.CIRCULAR;
+  if (entry.COLOR != null && entry.COLOR.R != null) {
+    v.color = { r: entry.COLOR.R, g: entry.COLOR.G, b: entry.COLOR.B };
+  }
+  if (Array.isArray(entry.FRAMES)) {
+    v.frames = entry.FRAMES;
+  }
+  if (entry.RESOURCES != null) v.resources = entry.RESOURCES;
+  return v;
+}
+
+/**
+ * Extract full sprite/furniture data from a building's SPRITES block.
+ * Each sprite type key maps to one or more visual variants.
+ * @param {Object} data - Parsed room data
+ * @returns {Array<{type: string, size: {w:number,h:number}|null, variants: Object[]}>}
+ */
+function extractSpritesFull(data) {
+  if (!data.SPRITES || typeof data.SPRITES !== "object") return [];
+
+  // Detect flat SPRITES: the object itself is a single sprite variant
+  // (has FRAMES/ROTATES/FPS directly, no named sprite category sub-objects)
+  const spriteKeys = Object.keys(data.SPRITES);
+  const isFlat = spriteKeys.some(k => SPRITE_VARIANT_PROPS.has(k)) &&
+    !spriteKeys.some(k => !SPRITE_VARIANT_PROPS.has(k) && !/^\d+$/.test(k));
+
+  if (isFlat) {
+    const variant = extractSpriteVariant(data.SPRITES);
+    return [{ type: "_flat", variants: [variant] }];
+  }
+
+  const sprites = [];
+  for (const [key, value] of Object.entries(data.SPRITES)) {
+    const size = parseSpriteSize(key);
+    const variants = [];
+
+    if (Array.isArray(value)) {
+      // Array of variant objects
+      for (const entry of value) {
+        if (entry && typeof entry === "object") {
+          variants.push(extractSpriteVariant(entry));
+        }
+      }
+    } else if (value && typeof value === "object") {
+      // Single variant object (might have numeric keys for sub-variants, or be a direct entry)
+      if (value.FRAMES != null || value.ROTATES != null || value.FPS != null || value.SHADOW_LENGTH != null) {
+        // Direct sprite entry
+        variants.push(extractSpriteVariant(value));
+      } else {
+        // Numeric-keyed sub-variants (0, 1, 2, ...)
+        const numericKeys = Object.keys(value).filter(k => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b));
+        if (numericKeys.length > 0) {
+          for (const k of numericKeys) {
+            const entry = value[k];
+            if (entry && typeof entry === "object") {
+              variants.push(extractSpriteVariant(entry));
+            }
+          }
+        }
+        // Also check for non-numeric top-level fields that might be a direct entry
+        const nonNumeric = Object.keys(value).filter(k => !/^\d+$/.test(k));
+        if (nonNumeric.length > 0 && numericKeys.length === 0) {
+          variants.push(extractSpriteVariant(value));
+        }
+      }
+    }
+
+    if (variants.length > 0) {
+      const sprite = { type: key, variants };
+      if (size) sprite.size = size;
+      sprites.push(sprite);
+    }
+  }
+  return sprites;
+}
+
 function extractAreaCosts(data) {
   const resTypes = data.RESOURCES;
   if (!Array.isArray(resTypes) || !Array.isArray(data.AREA_COSTS)) return [];
@@ -1243,9 +1350,9 @@ function extractBuildingMetadata(data) {
     if (Object.keys(training).length > 0) meta.training = training;
   }
 
-  // Sprite type names (furniture size/function hints)
+  // Sprite type names (kept for backward compat; full data via extractSpritesFull)
   if (data.SPRITES && typeof data.SPRITES === "object") {
-    const spriteTypes = Object.keys(data.SPRITES);
+    const spriteTypes = Object.keys(data.SPRITES).filter(k => !SPRITE_VARIANT_PROPS.has(k));
     if (spriteTypes.length > 0) meta.spriteTypes = spriteTypes;
   }
 
@@ -1277,6 +1384,7 @@ function extractBuildings(resources) {
     let upgradeCosts = [];
 
     let items = [];
+    let sprites = [];
     let areaCosts = [];
     let upgradeBoosts = [];
 
@@ -1287,6 +1395,7 @@ function extractBuildings(resources) {
         constructionCosts = extractConstructionCosts(data);
         upgradeCosts = extractUpgradeCosts(data);
         items = extractItems(data);
+        sprites = extractSpritesFull(data);
         areaCosts = extractAreaCosts(data);
         upgradeBoosts = extractUpgradeBoosts(data);
         metadata = extractBuildingMetadata(data);
@@ -1298,6 +1407,7 @@ function extractBuildings(resources) {
         constructionCosts = extractConstructionCosts(data);
         upgradeCosts = extractUpgradeCosts(data);
         items = extractItems(data);
+        sprites = extractSpritesFull(data);
         areaCosts = extractAreaCosts(data);
         upgradeBoosts = extractUpgradeBoosts(data);
         metadata = extractBuildingMetadata(data);
@@ -1308,6 +1418,7 @@ function extractBuildings(resources) {
       constructionCosts = extractConstructionCosts(data);
       upgradeCosts = extractUpgradeCosts(data);
       items = extractItems(data);
+      sprites = extractSpritesFull(data);
       areaCosts = extractAreaCosts(data);
       upgradeBoosts = extractUpgradeBoosts(data);
       metadata = extractBuildingMetadata(data);
@@ -1364,6 +1475,7 @@ function extractBuildings(resources) {
     };
     if (upgradeCosts.length > 0) building.upgradeCosts = upgradeCosts;
     if (items.length > 0) building.items = items;
+    if (sprites.length > 0) building.sprites = sprites;
     if (areaCosts.length > 0) building.areaCosts = areaCosts;
     if (upgradeBoosts.length > 0) building.upgradeBoosts = upgradeBoosts;
 
@@ -1987,6 +2099,11 @@ export const buildings = [
       code += `    ],\n`;
     }
 
+    // Sprites (full furniture data)
+    if (b.sprites && b.sprites.length > 0) {
+      code += `    sprites: ${JSON.stringify(b.sprites)},\n`;
+    }
+
     // Area costs (per-tile)
     if (b.areaCosts && b.areaCosts.length > 0) {
       const acStr = b.areaCosts
@@ -2317,11 +2434,164 @@ function validateExtractedData(resources, buildings) {
   }
 }
 
+// ── Sprite/Furniture Dump ────────────────────────────────────
+
+function dumpSprites() {
+  console.log("=== SPRITE/FURNITURE DUMP ===\n");
+
+  const roomPaths = listZipPaths(DATA_ZIP, /^data\/assets\/init\/room\/[A-Z_]+\.txt$/);
+
+  // Sample buildings to dump in full detail
+  const sampleBuildings = new Set([
+    "WELL_NORMAL", "_HEARTH", "WORKSHOP_CARPENTER", "WORKSHOP_HUNTER",
+    "MINE_CLAY", "LABORATORY_NORMAL", "_CANNIBAL", "_TAVERN",
+  ]);
+
+  // Frequency maps for field analysis
+  const itemFieldFreq = new Map();   // field name → count of buildings
+  const spriteFieldFreq = new Map(); // field name → count of buildings
+  const spriteEntryFieldFreq = new Map(); // inner field name → count across all entries
+
+  let buildingsWithItems = 0;
+  let buildingsWithSprites = 0;
+  let totalItems = 0;
+  let totalSpriteEntries = 0;
+
+  for (const path of roomPaths) {
+    const filename = path.split("/").pop().replace(".txt", "");
+    const content = unzipFile(DATA_ZIP, path);
+    if (!content) continue;
+    const data = parseSosFormat(content);
+
+    const isSample = sampleBuildings.has(filename);
+
+    // ── ITEMS analysis ──
+    if (data.ITEMS && Array.isArray(data.ITEMS) && data.ITEMS.length > 0) {
+      buildingsWithItems++;
+      totalItems += data.ITEMS.length;
+
+      // Track which fields appear in this building's ITEMS
+      const fieldsInBuilding = new Set();
+      for (const item of data.ITEMS) {
+        if (item && typeof item === "object") {
+          for (const key of Object.keys(item)) {
+            fieldsInBuilding.add(key);
+          }
+        }
+      }
+      for (const f of fieldsInBuilding) {
+        itemFieldFreq.set(f, (itemFieldFreq.get(f) || 0) + 1);
+      }
+
+      if (isSample) {
+        console.log(`── ${filename} ITEMS (${data.ITEMS.length} entries) ──`);
+        console.log(JSON.stringify(data.ITEMS, null, 2));
+        console.log();
+      }
+    }
+
+    // ── SPRITES analysis ──
+    if (data.SPRITES && typeof data.SPRITES === "object") {
+      const spriteKeys = Object.keys(data.SPRITES);
+      if (spriteKeys.length > 0) {
+        buildingsWithSprites++;
+        totalSpriteEntries += spriteKeys.length;
+
+        // Track top-level keys in SPRITES object
+        const fieldsInBuilding = new Set();
+        for (const key of spriteKeys) {
+          fieldsInBuilding.add(key);
+          // Also analyze inner structure of each sprite entry
+          const entry = data.SPRITES[key];
+          if (entry && typeof entry === "object") {
+            for (const innerKey of Object.keys(entry)) {
+              spriteEntryFieldFreq.set(innerKey, (spriteEntryFieldFreq.get(innerKey) || 0) + 1);
+            }
+          }
+        }
+        for (const f of fieldsInBuilding) {
+          spriteFieldFreq.set(f, (spriteFieldFreq.get(f) || 0) + 1);
+        }
+
+        if (isSample) {
+          console.log(`── ${filename} SPRITES (${spriteKeys.length} entries) ──`);
+          console.log(JSON.stringify(data.SPRITES, null, 2));
+          console.log();
+        }
+      }
+    }
+
+    // ── Other furniture-related keys ──
+    if (isSample) {
+      const furnitureKeys = Object.keys(data).filter(k =>
+        /FURNITURE|PLACEMENT|STAT_NAME|MUST|WALKAB|ROTATIONS|PLACER|FLOOR_REQ/.test(k)
+      );
+      if (furnitureKeys.length > 0) {
+        console.log(`── ${filename} other furniture-related keys ──`);
+        for (const k of furnitureKeys) {
+          console.log(`  ${k}: ${JSON.stringify(data[k], null, 2)}`);
+        }
+        console.log();
+      }
+
+      // Also dump RESOURCES array (needed to interpret COSTS indices)
+      if (data.RESOURCES) {
+        console.log(`── ${filename} RESOURCES ──`);
+        console.log(`  ${JSON.stringify(data.RESOURCES)}`);
+        console.log();
+      }
+    }
+  }
+
+  // ── Frequency analysis ──
+  console.log("══════════════════════════════════════════════");
+  console.log(`\n── ITEMS field frequency (${buildingsWithItems} buildings, ${totalItems} total items) ──`);
+  const sortedItemFields = [...itemFieldFreq.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [field, count] of sortedItemFields) {
+    console.log(`  ${field.padEnd(30)}: ${count} buildings`);
+  }
+
+  console.log(`\n── SPRITES top-level key frequency (${buildingsWithSprites} buildings, ${totalSpriteEntries} total entries) ──`);
+  const sortedSpriteFields = [...spriteFieldFreq.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [field, count] of sortedSpriteFields) {
+    console.log(`  ${field.padEnd(30)}: ${count} buildings`);
+  }
+
+  console.log(`\n── SPRITES inner field frequency (across all sprite entries) ──`);
+  const sortedInnerFields = [...spriteEntryFieldFreq.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [field, count] of sortedInnerFields) {
+    console.log(`  ${field.padEnd(30)}: ${count} entries`);
+  }
+
+  // ── Item-to-Sprite correlation ──
+  console.log("\n── ITEMS count vs SPRITES count per building ──");
+  for (const path of roomPaths) {
+    const filename = path.split("/").pop().replace(".txt", "");
+    const content = unzipFile(DATA_ZIP, path);
+    if (!content) continue;
+    const data = parseSosFormat(content);
+    const itemCount = (data.ITEMS && Array.isArray(data.ITEMS)) ? data.ITEMS.length : 0;
+    const spriteCount = (data.SPRITES && typeof data.SPRITES === "object") ? Object.keys(data.SPRITES).length : 0;
+    if (itemCount > 0 || spriteCount > 0) {
+      const match = itemCount === spriteCount ? "" : " *** MISMATCH";
+      console.log(`  ${filename.padEnd(35)}: ITEMS=${itemCount}  SPRITES=${spriteCount}${match}`);
+    }
+  }
+
+  console.log("\n=== DUMP COMPLETE ===");
+}
+
 // ── Main ────────────────────────────────────────────────────
 
 // Handle --audit flag
 if (process.argv.includes("--audit")) {
   runAudit();
+  process.exit(0);
+}
+
+// Handle --dump-sprites flag
+if (process.argv.includes("--dump-sprites")) {
+  dumpSprites();
   process.exit(0);
 }
 
@@ -2477,6 +2747,9 @@ console.log(`  Buildings with items: ${itemsCount}`);
 console.log(`  Buildings with areaCosts: ${areaCostsCount}`);
 console.log(`  Buildings with upgradeBoosts: ${upgradeBoostsCount}`);
 console.log(`  Buildings with spriteTypes: ${spriteTypesCount}`);
+const spritesCount = buildings.filter(b => b.sprites).length;
+const totalSpriteTypes = buildings.reduce((sum, b) => sum + (b.sprites ? b.sprites.length : 0), 0);
+console.log(`  Buildings with sprites: ${spritesCount} (${totalSpriteTypes} total sprite types)`);
 console.log(`  Buildings with extraResource: ${extraResCount}`);
 console.log(`Settlement: ${settlement.structures.length} structures, ${settlement.floors.length} floors, ${settlement.fences.length} fences, ${settlement.fortifications.length} fortifications`);
 console.log(`Races: ${races.length}`);
