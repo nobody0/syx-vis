@@ -5,6 +5,8 @@
 //
 // Usage: node scripts/extract-game-data.js [path-to-data.zip]
 //        node scripts/extract-game-data.js --audit
+//        node scripts/extract-game-data.js --dump-sprites
+//        node scripts/extract-game-data.js --discover-sprites
 // Path: CLI arg → DATA_ZIP env var (set in .env) → error
 
 import { execSync } from "child_process";
@@ -2581,7 +2583,319 @@ function dumpSprites() {
   console.log("\n=== DUMP COMPLETE ===");
 }
 
+// ── Room Sprite Extraction ───────────────────────────────────
+
+/**
+ * Parse a frame reference string like "COMBO_TABLES: 1" or "STORAGE: 0".
+ * @param {string} frameStr
+ * @returns {{ sheetName: string, index: number } | null}
+ */
+function parseFrameRef(frameStr) {
+  if (!frameStr || typeof frameStr !== "string") return null;
+  const match = frameStr.match(/^([A-Za-z0-9_x]+)\s*:\s*(\d+)$/);
+  if (!match) return null;
+  return { sheetName: match[1], index: parseInt(match[2]) };
+}
+
+/**
+ * Per-directory base tile sizes (width × height).
+ * Derived empirically from sheet dimensions and max frame indices:
+ * - 1x1:  44×22 (isometric 1-tile), width GCD=44, most sheets height%22==0
+ * - 2x2:  88×44 (2×2 isometric tiles)
+ * Sheets have 2 halves: left = icon, right = normal map.
+ * Each half has cells stacked vertically with a frame border around each.
+ * Frame border contains indicator colors (red/green/pink/black/blue/purple).
+ *
+ * - 1x1:   22×22 cell, 3px frame → 16×16 body
+ * - 2x2:   44×44 cell, 6px frame → 32×32 body
+ * - 3x3:   60×60 cell, 6px frame → 48×48 body
+ * - box:   76×76 cell, 6px frame → 64×64 body
+ * - combo: 72×72 cell, 2px frame → 48×48 main tile (internal 4px separator + 16×16 sub-tile ignored)
+ * - texture: not used for extraction
+ *
+ * Compound 1x1 sheets (2xROOF, MECHx2, STORAGEx3, 4xTEMPLE_DECOR, etc.) have
+ * taller cells containing N stacked 16px sub-tiles. Cell pitch = N*16 + 6.
+ * The frame ref index addresses sub-tiles sequentially across compound cells.
+ */
+const ROOM_SPRITE_TILE_SIZES = {
+  "1x1":  { cell: 22, frame: 3 },   // body 16×16 (compound sheets override cell height)
+  "2x2":  { cell: 44, frame: 6 },   // body 32×32
+  "3x3":  { cell: 60, frame: 6 },   // body 48×48
+  "box":  { cell: 76, frame: 6 },   // body 64×64
+  "combo": { cell: 72, frame: 2 },  // body 48×48 (main tile only, skip internal separator)
+};
+
+/** @type {Map<string, Array<{zipPath: string, dir: string}>>} sheetName → all locations (built once) */
+let roomSpriteIndex = null;
+
+/**
+ * Build an index of all available room sprite sheet PNGs.
+ * Maps sheet name (e.g. "COMBO_TABLES") to all matching zip paths + directories.
+ * Some sheets exist in multiple dirs (e.g. FENCE in both 1x1 and combo).
+ */
+function buildRoomSpriteIndex() {
+  if (roomSpriteIndex) return;
+  roomSpriteIndex = new Map();
+
+  const allPaths = listZipPaths(DATA_ZIP, /^data\/assets\/sprite\/game\/.*\.png$/);
+  for (const p of allPaths) {
+    const parts = p.split("/");
+    const filename = parts[parts.length - 1];
+    const dir = parts[parts.length - 2];
+    const sheetName = filename.replace(".png", "");
+    if (!roomSpriteIndex.has(sheetName)) {
+      roomSpriteIndex.set(sheetName, []);
+    }
+    roomSpriteIndex.get(sheetName).push({ zipPath: p, dir });
+  }
+}
+
+/**
+ * Find all locations of a room sprite sheet PNG in the game data ZIP.
+ * @param {string} sheetName - e.g. "COMBO_TABLES", "STORAGE"
+ * @returns {Array<{zipPath: string, dir: string}>}
+ */
+function findRoomSpriteSheets(sheetName) {
+  buildRoomSpriteIndex();
+  return roomSpriteIndex.get(sheetName) || [];
+}
+
+/**
+ * Detect compound multiplier from a 1x1 sheet name.
+ * Compound sheets (2xROOF, MECHx2, STORAGEx3, 4xTEMPLE_DECOR) contain
+ * N stacked 16px sub-tiles per cell. Returns 1 for normal sheets.
+ * @param {string} sheetName
+ * @returns {number}
+ */
+function getCompoundMultiplier(sheetName) {
+  const prefix = sheetName.match(/^(\d+)x/);
+  if (prefix) return parseInt(prefix[1]);
+  const suffix = sheetName.match(/x(\d+)$/);
+  if (suffix) return parseInt(suffix[1]);
+  return 1;
+}
+
+/**
+ * Crop a single room sprite tile from a spritesheet.
+ * Sheets have 2 halves (left=icon, right=normal map). We use left half only.
+ * Each cell has a decorative frame border that must be skipped.
+ *
+ * For compound 1x1 sheets (2x, x2, x3, 4x), cells are taller (N*16+6) and
+ * the index addresses individual 16px sub-tiles across compound cells.
+ *
+ * For combo sheets, only the 48×48 main tile is extracted (internal
+ * red/green separators and 16×16 sub-tile are skipped).
+ *
+ * @param {string} sheetName - e.g. "COMBO_TABLES"
+ * @param {number} index - row index (or sub-tile index for compound sheets)
+ * @returns {PNG|null}
+ */
+function getRoomSpriteTile(sheetName, index) {
+  const locations = findRoomSpriteSheets(sheetName);
+  if (locations.length === 0) return null;
+
+  // Try each location — handles sheets that exist in multiple dirs (e.g. FENCE in 1x1 + combo)
+  for (const found of locations) {
+    const result = tryExtractSpriteTile(found, sheetName, index);
+    if (result) return result;
+  }
+  return null;
+}
+
+/**
+ * Try to extract a sprite tile from a specific sheet location.
+ * @param {{ zipPath: string, dir: string }} found
+ * @param {string} sheetName
+ * @param {number} index
+ * @returns {PNG|null}
+ */
+function tryExtractSpriteTile(found, sheetName, index) {
+  const sheet = loadSheet(found.zipPath);
+  if (!sheet) return null;
+
+  const tileSize = ROOM_SPRITE_TILE_SIZES[found.dir];
+  if (!tileSize) return null;
+
+  const { cell, frame } = tileSize;
+  const halfWidth = Math.floor(sheet.width / 2);
+
+  let srcX, srcY, bodyW, bodyH;
+
+  if (found.dir === "combo") {
+    // Combo cells: 72×72 cell, 2px frame, but internal structure has
+    // 48×48 main tile + 4px separator + 16×16 sub-tile. Extract main only.
+    const numRows = Math.floor(sheet.height / cell);
+    if (index >= numRows) return null;
+    srcX = frame;
+    srcY = index * cell + frame;
+    bodyW = 48;
+    bodyH = 48;
+  } else if (found.dir === "1x1") {
+    // Check for compound sheets (2xROOF, MECHx2, STORAGEx3, etc.)
+    const N = getCompoundMultiplier(sheetName);
+    const subTileH = 16;
+
+    if (N > 1) {
+      // Compound: cell pitch = N*16 + 6, contains N stacked 16px sub-tiles
+      const compoundCellH = N * subTileH + 2 * frame;
+      const compoundCell = Math.floor(index / N);
+      const subTile = index % N;
+      srcX = frame;
+      srcY = compoundCell * compoundCellH + frame + subTile * subTileH;
+      bodyW = cell - 2 * frame;
+      bodyH = subTileH;
+    } else {
+      // Normal 1x1: standard cell=22, body=16×16
+      const numRows = Math.floor(sheet.height / cell);
+      if (index >= numRows) return null;
+      srcX = frame;
+      srcY = index * cell + frame;
+      bodyW = cell - 2 * frame;
+      bodyH = cell - 2 * frame;
+    }
+  } else {
+    // 2x2, 3x3, box: standard cell layout
+    const numRows = Math.floor(sheet.height / cell);
+    if (index >= numRows) return null;
+    srcX = frame;
+    srcY = index * cell + frame;
+    bodyW = cell - 2 * frame;
+    bodyH = cell - 2 * frame;
+  }
+
+  // Clamp to left half of sheet
+  bodyW = Math.min(bodyW, halfWidth - srcX);
+  if (bodyW < 4 || bodyH < 4) return null;
+  if (srcX + bodyW > halfWidth || srcY + bodyH > sheet.height) return null;
+
+  const out = new PNG({ width: bodyW, height: bodyH });
+  for (let y = 0; y < bodyH; y++) {
+    for (let x = 0; x < bodyW; x++) {
+      const si = ((srcY + y) * sheet.width + (srcX + x)) * 4;
+      const di = (y * bodyW + x) * 4;
+      out.data[di] = sheet.data[si];
+      out.data[di + 1] = sheet.data[si + 1];
+      out.data[di + 2] = sheet.data[si + 2];
+      out.data[di + 3] = sheet.data[si + 3];
+    }
+  }
+  return out;
+}
+
+/**
+ * Extract room sprite tiles for all buildings and write to data/sprites/.
+ * For each building's sprite types, takes the first variant's first frame.
+ * @param {Array} buildings
+ */
+function extractRoomSprites(buildings) {
+  console.log("Extracting room sprites...");
+
+  const spriteDir = resolve(PROJECT_ROOT, "data/sprites");
+  if (!existsSync(spriteDir)) {
+    mkdirSync(spriteDir, { recursive: true });
+  }
+
+  let totalExtracted = 0;
+  let totalFailed = 0;
+  let buildingsProcessed = 0;
+
+  for (const b of buildings) {
+    if (!b.sprites || b.sprites.length === 0) continue;
+    buildingsProcessed++;
+
+    const buildingDir = resolve(spriteDir, b.id);
+    if (!existsSync(buildingDir)) {
+      mkdirSync(buildingDir, { recursive: true });
+    }
+
+    for (const sprite of b.sprites) {
+      // Find the first non-empty frame from the first variant
+      let frameRef = null;
+      for (const variant of sprite.variants) {
+        if (Array.isArray(variant.frames) && variant.frames.length > 0) {
+          frameRef = variant.frames[0];
+          break;
+        }
+      }
+      if (!frameRef) continue;
+
+      const parsed = parseFrameRef(frameRef);
+      if (!parsed) continue;
+
+      const tile = getRoomSpriteTile(parsed.sheetName, parsed.index);
+      if (!tile) {
+        totalFailed++;
+        if (totalFailed <= 5) {
+          console.warn(`  Warning: Could not extract sprite "${sprite.type}" for "${b.id}" (sheet: ${parsed.sheetName}:${parsed.index})`);
+        }
+        continue;
+      }
+
+      const outFile = resolve(buildingDir, `${sprite.type.toLowerCase()}.png`);
+      writeFileSync(outFile, PNG.sync.write(tile));
+      totalExtracted++;
+    }
+  }
+
+  console.log(`  Extracted ${totalExtracted} room sprites across ${buildingsProcessed} buildings (${totalFailed} failed)`);
+}
+
+// ── Discover Room Sprite Paths ───────────────────────────────
+
+function discoverRoomSpritePaths() {
+  console.log("=== ROOM SPRITE PATH DISCOVERY ===\n");
+
+  const patterns = [
+    { label: "settlement/room/", re: /^data\/assets\/sprite\/settlement\/room\// },
+    { label: "settlement/", re: /^data\/assets\/sprite\/settlement\// },
+    { label: "sprite/room/", re: /^data\/assets\/sprite\/room\// },
+    { label: "COMBO_TABLES", re: /COMBO_TABLES/i },
+    { label: "STORAGE.png", re: /STORAGE\.png$/i },
+    { label: "sprite/ .png files", re: /^data\/assets\/sprite\/.*\.png$/ },
+  ];
+
+  for (const { label, re } of patterns) {
+    const paths = listZipPaths(DATA_ZIP, re);
+    if (paths.length > 0) {
+      console.log(`Pattern "${label}" (${re}): ${paths.length} matches`);
+      for (const p of paths.slice(0, 30)) console.log(`  ${p}`);
+      if (paths.length > 30) console.log(`  ... and ${paths.length - 30} more`);
+      console.log();
+    } else {
+      console.log(`Pattern "${label}" (${re}): 0 matches\n`);
+    }
+  }
+
+  // Also dump the SPRITES data from a few buildings to correlate sheet names with paths
+  console.log("── Sample building SPRITES for correlation ──\n");
+  const sampleFiles = ["_CANNIBAL", "WELL_NORMAL", "WORKSHOP_CARPENTER", "MINE_CLAY"];
+  for (const filename of sampleFiles) {
+    const content = unzipFile(DATA_ZIP, `data/assets/init/room/${filename}.txt`);
+    if (!content) { console.log(`  ${filename}: not found`); continue; }
+    const data = parseSosFormat(content);
+    if (data.SPRITES) {
+      const keys = Object.keys(data.SPRITES);
+      console.log(`  ${filename}: SPRITES keys = [${keys.join(", ")}]`);
+      for (const key of keys.slice(0, 5)) {
+        const entry = data.SPRITES[key];
+        console.log(`    ${key}: ${JSON.stringify(entry)}`);
+      }
+    } else {
+      console.log(`  ${filename}: no SPRITES block`);
+    }
+    console.log();
+  }
+
+  console.log("=== DISCOVERY COMPLETE ===");
+}
+
 // ── Main ────────────────────────────────────────────────────
+
+// Handle --discover-sprites flag
+if (process.argv.includes("--discover-sprites")) {
+  discoverRoomSpritePaths();
+  process.exit(0);
+}
 
 // Handle --audit flag
 if (process.argv.includes("--audit")) {
@@ -2624,6 +2938,9 @@ console.log(`  Found ${buildings.length} buildings with ${totalRecipes} recipes`
 
 // Extract building icons
 const buildingIconMapping = extractBuildingIcons(buildings);
+
+// Extract room sprites
+extractRoomSprites(buildings);
 
 // Extract tech trees and link to buildings
 const techTrees = extractTechTrees();

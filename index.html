@@ -42,6 +42,7 @@
       <button class="tab" data-tab="population" title="Per-capita needs, equipment, and species (Alt+2)"><span class="tab-icon">&#9673;</span> Population</button>
       <button class="tab" data-tab="upkeep" title="Building maintenance costs (Alt+3)"><span class="tab-icon">&#9651;</span> Upkeep</button>
       <button class="tab" data-tab="balancing" title="Production chain calculator (Alt+4)"><span class="tab-icon">&#9655;</span> Balancing</button>
+      <button class="tab" data-tab="planner" title="Room furniture planner (Alt+5)"><span class="tab-icon">&#9638;</span> Planner</button>
     </div>
     <button id="help-btn" title="Help (?)" aria-label="Help">?</button>
   </div>
@@ -61,6 +62,7 @@
   <div id="view-population" class="view"></div>
   <div id="view-upkeep" class="view"></div>
   <div id="view-balancing" class="view"></div>
+  <div id="view-planner" class="view"></div>
 
   <!--
     ES Modules require an HTTP server — file:// will block imports due to CORS.
@@ -70,9 +72,11 @@
   <script type="module">
     try {
       const { render } = await import("./display/render.js");
-      const { initTabs } = await import("./display/tabs.js");
+      const { initTabs, switchTab, restorePlan } = await import("./display/tabs.js");
+      const { initRouter } = await import("./display/router.js");
       render();
       initTabs();
+      initRouter(switchTab, restorePlan);
     } catch (err) {
       document.body.style.display = "flex";
       document.body.style.justifyContent = "center";
