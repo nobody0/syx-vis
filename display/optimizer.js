@@ -78,6 +78,9 @@ export async function runOptimizer(input) {
   // Phase 0: Analysis & precomputation
   analyzePhase(ctx);
 
+  // Phase 0-: Trim dead-end tendrils before SA
+  preCleanRoom(ctx);
+
   // Phase 0.5: Pre-place support pillars (before any furniture)
   await prePlacePillars(ctx);
 
@@ -211,6 +214,8 @@ function createContext(input) {
     statsDirty: true,
     groupCounts: null,
     occupiedCount: 0,
+    // Incremental group-identity grid for type-aware alignment scoring
+    groupGrid: Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1)),
   };
 
   ctx.occupancy = buildOccupancyGrid(ctx);
@@ -265,6 +270,24 @@ function rebuildRoomTiles(ctx) {
   rebuildGroupCounts(ctx);
 }
 
+/** Remove a single room tile and update room, roomTileSet, roomTiles. */
+function removeRoomTile(ctx, r, c) {
+  ctx.room[r][c] = false;
+  const key = r * ctx.gridW + c;
+  ctx.roomTileSet.delete(key);
+  const idx = ctx.roomTiles.findIndex(t => t.r === r && t.c === c);
+  if (idx >= 0) ctx.roomTiles.splice(idx, 1);
+  markStabilityDirty(ctx);
+}
+
+/** Restore a room tile and update room, roomTileSet, roomTiles. */
+function restoreRoomTile(ctx, r, c) {
+  ctx.room[r][c] = true;
+  ctx.roomTiles.push({ r, c });
+  ctx.roomTileSet.add(r * ctx.gridW + c);
+  markStabilityDirty(ctx);
+}
+
 function rebuildGroupCounts(ctx) {
   const numGroups = ctx.furnitureSet.groups.length;
   ctx.groupCounts = new Int16Array(numGroups);
@@ -280,8 +303,9 @@ function rebuildGroupCounts(ctx) {
 function buildOccupancyGrid(ctx) {
   const { gridW, gridH, placements, furnitureSet: fs } = ctx;
   const grid = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
-  // Reset blocker count and occupied count
+  // Reset blocker count, occupied count, and group grid
   const bc = Array.from({ length: gridH }, () => new Int8Array(gridW));
+  const gg = Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1));
   let occCount = 0;
   for (let pi = 0; pi < placements.length; pi++) {
     const p = placements[pi];
@@ -294,6 +318,7 @@ function buildOccupancyGrid(ctx) {
         if (gr >= 0 && gr < gridH && gc >= 0 && gc < gridW) {
           if (grid[gr][gc] < 0) occCount++;
           grid[gr][gc] = pi;
+          gg[gr][gc] = p.groupIdx;
           const tt = fs.tileTypes[tileKey];
           if (tt && AVAIL_BLOCKING.has(tt.availability)) {
             bc[gr][gc]++;
@@ -303,6 +328,7 @@ function buildOccupancyGrid(ctx) {
     }
   }
   ctx.blockerCount = bc;
+  ctx.groupGrid = gg;
   ctx.occupiedCount = occCount;
   ctx.statsDirty = true;
   ctx.stabilityDirty = true;
@@ -325,6 +351,7 @@ function setOccupancy(ctx, pi) {
       if (ctx.occupancy[gr][gc] >= 0 && ctx.occupancy[gr][gc] !== pi) overlap = true;
       if (ctx.occupancy[gr][gc] < 0) ctx.occupiedCount++;
       ctx.occupancy[gr][gc] = pi;
+      ctx.groupGrid[gr][gc] = p.groupIdx;
       // Phase 1b: Update blocker tracking
       const tt = fs.tileTypes[tileKey];
       if (tt && AVAIL_BLOCKING.has(tt.availability)) {
@@ -350,6 +377,7 @@ function clearOccupancy(ctx, pi) {
       if (gr >= 0 && gr < ctx.gridH && gc >= 0 && gc < ctx.gridW) {
         if (ctx.occupancy[gr][gc] === pi) {
           ctx.occupancy[gr][gc] = -1;
+          ctx.groupGrid[gr][gc] = -1;
           ctx.occupiedCount--;
           // Only decrement blocker when this piece actually owns the tile
           const tt = fs.tileTypes[tileKey];
@@ -490,6 +518,39 @@ function scoreLayoutSA(ctx) {
     if (runLen >= 2) alignBonus += runLen * 0.5;
   }
 
+  // Type-aware alignment bonus — reward runs of same groupIdx along rows/cols
+  let typeAlignBonus = 0;
+  // Horizontal runs
+  for (let r = 0; r < gridH; r++) {
+    let runLen = 0, runGroup = -1;
+    for (let c = 0; c < gridW; c++) {
+      const g = ctx.groupGrid[r][c];
+      if (g >= 0 && g === runGroup) {
+        runLen++;
+      } else {
+        if (runLen >= 2) typeAlignBonus += runLen * 0.3;
+        runLen = g >= 0 ? 1 : 0;
+        runGroup = g;
+      }
+    }
+    if (runLen >= 2) typeAlignBonus += runLen * 0.3;
+  }
+  // Vertical runs
+  for (let c = 0; c < gridW; c++) {
+    let runLen = 0, runGroup = -1;
+    for (let r = 0; r < gridH; r++) {
+      const g = ctx.groupGrid[r][c];
+      if (g >= 0 && g === runGroup) {
+        runLen++;
+      } else {
+        if (runLen >= 2) typeAlignBonus += runLen * 0.3;
+        runLen = g >= 0 ? 1 : 0;
+        runGroup = g;
+      }
+    }
+    if (runLen >= 2) typeAlignBonus += runLen * 0.3;
+  }
+
   // Phase 2e: Walkway corridor bonus — reward straight runs of open tiles
   let walkwayBonus = 0;
   // Horizontal walkways
@@ -520,7 +581,7 @@ function scoreLayoutSA(ctx) {
   }
 
   return primary * 1000 + secondary + effBonus + relBonus + packingBonus
-         + alignBonus * 2 + walkwayBonus * 0.5
+         + alignBonus * 2 + typeAlignBonus * 2 + walkwayBonus * 0.5
          - totalCost * 0.001 - effPenalty - relPenalty
          - stabilityPenalty - roomPenalty;
 }
@@ -1009,6 +1070,59 @@ function checkRoomConnectivity(ctx) {
   return reached >= totalRoom;
 }
 
+/** After an ERASE move disconnects the room, try to auto-clean the smaller fragment.
+ *  Returns true if fragments were cleaned (move is safe), false if rejected.
+ *  Stores cleaned tiles in move.autoCleanedTiles for revert. */
+function findAndCleanFragments(ctx, move) {
+  const { gridW, gridH, room } = ctx;
+  // BFS from first room tile to find the main component
+  let startR = -1, startC = -1;
+  for (let r = 0; r < gridH && startR < 0; r++)
+    for (let c = 0; c < gridW && startR < 0; c++)
+      if (room[r][c]) { startR = r; startC = c; }
+  if (startR < 0) return false;
+
+  const visited = Array.from({ length: gridH }, () => Array(gridW).fill(false));
+  const q = ctx.bfsQueue;
+  q.reset();
+  q.push(startR, startC);
+  visited[startR][startC] = true;
+  while (q.length > 0) {
+    const [cr, cc] = q.shift();
+    for (const [dr, dc] of DIRS) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      if (visited[nr][nc] || !room[nr][nc]) continue;
+      visited[nr][nc] = true;
+      q.push(nr, nc);
+    }
+  }
+
+  // Collect disconnected tiles
+  const disconnected = [];
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c] && !visited[r][c])
+        disconnected.push({ r, c });
+
+  if (disconnected.length === 0) return true; // already connected
+  if (disconnected.length > 3) return false; // too many to auto-clean
+
+  // Safety: none occupied, none are doors
+  for (const { r, c } of disconnected) {
+    if (ctx.occupancy[r][c] >= 0) return false;
+    if (ctx.doors.has(`${r},${c}`)) return false;
+  }
+
+  // Erase all disconnected tiles
+  move.autoCleanedTiles = [];
+  for (const { r, c } of disconnected) {
+    removeRoomTile(ctx, r, c);
+    move.autoCleanedTiles.push({ r, c });
+  }
+  return true;
+}
+
 function canEraseTile(ctx, r, c) {
   if (!ctx.room[r][c]) return false;
   if (ctx.occupancy[r][c] >= 0) return false;
@@ -1032,6 +1146,37 @@ function canEraseTile(ctx, r, c) {
 
 function yieldToUI() {
   return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+// ── Phase 0-: Room pre-cleanup (trim tendrils) ───────────
+
+/** Remove dead-end room tiles (>= 3 non-room cardinal neighbors) before SA. */
+function preCleanRoom(ctx) {
+  for (let pass = 0; pass < 20; pass++) {
+    let changed = false;
+    for (let i = ctx.roomTiles.length - 1; i >= 0; i--) {
+      const { r, c } = ctx.roomTiles[i];
+      // Count non-room cardinal neighbors
+      let nonRoom = 0;
+      for (const [dr, dc] of DIRS) {
+        const nr = r + dr, nc = c + dc;
+        if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) {
+          nonRoom++;
+        }
+      }
+      if (nonRoom < 3) continue;
+      // Skip if occupied
+      if (ctx.occupancy[r][c] >= 0) continue;
+      // Temporarily erase, check connectivity
+      removeRoomTile(ctx, r, c);
+      if (checkRoomConnectivity(ctx)) {
+        changed = true;
+      } else {
+        restoreRoomTile(ctx, r, c);
+      }
+    }
+    if (!changed) break;
+  }
 }
 
 // ── Phase 0: Analysis & Precomputation ───────────────────
@@ -1609,22 +1754,54 @@ const MOVE_WEIGHTS = {
 
 const MOVE_TYPES = Object.keys(MOVE_WEIGHTS);
 
-/** Phase 3e: Pick move type with dynamic ERASE/ADD_ROOM weights based on packing density. */
+/** Phase 3e: Pick move type with dynamic weights based on packing density. */
 function pickMoveType(ctx) {
   const roomTileCount = ctx.roomTiles.length;
   const density = roomTileCount > 0 ? ctx.occupiedCount / roomTileCount : 0;
 
-  // Dynamic weights: when sparse, aggressively erase; when dense, stop erasing
+  // Dynamic weights: adapt all move types based on packing density
+  let addW = MOVE_WEIGHTS.ADD;
+  let relocateW = MOVE_WEIGHTS.RELOCATE;
+  let slideW = MOVE_WEIGHTS.SLIDE;
+  let removeW = MOVE_WEIGHTS.REMOVE;
+  let rotateW = MOVE_WEIGHTS.ROTATE;
   let eraseW = MOVE_WEIGHTS.ERASE;
   let addRoomW = MOVE_WEIGHTS.ADD_ROOM;
-  if (density < 0.5) {
-    eraseW = 20 + Math.round((0.5 - density) * 40); // up to 40
+
+  if (density < 0.4) {
+    // Very sparse: focus on adding furniture, NOT shrinking room
+    addW = 35;
+    relocateW = 20;
+    slideW = 10;
+    removeW = 3;
+    eraseW = 1;     // near-zero: fill space first, trim later
     addRoomW = 1;
+  } else if (density < 0.6) {
+    // Filling up: still favor adding, light trimming allowed
+    addW = 25;
+    eraseW = 5;
+    addRoomW = 2;
   } else if (density > 0.8) {
-    eraseW = 2;
+    // Very dense: fine-tune and trim edges
+    slideW = 30;
+    relocateW = 8;
+    rotateW = 12;
+    removeW = 15;
+    addW = 5;
+    eraseW = 12;
+  } else {
+    // Moderately dense (0.6-0.8): fine-tuning moves, moderate trimming
+    slideW = 25;
+    relocateW = 10;
+    rotateW = 10;
+    eraseW = 8;
   }
 
-  const weights = { ...MOVE_WEIGHTS, ERASE: eraseW, ADD_ROOM: addRoomW };
+  const weights = {
+    ...MOVE_WEIGHTS,
+    ADD: addW, RELOCATE: relocateW, SLIDE: slideW, REMOVE: removeW,
+    ROTATE: rotateW, ERASE: eraseW, ADD_ROOM: addRoomW,
+  };
   let totalWeight = 0;
   for (const t of MOVE_TYPES) totalWeight += weights[t];
 
@@ -1745,7 +1922,12 @@ function checkMoveConstraints(ctx, move) {
     if (!checkWalkabilityOpt(ctx)) return false;
   }
   if (move.type === "ERASE") {
-    if (!checkRoomConnectivity(ctx)) return false;
+    if (!checkRoomConnectivity(ctx)) {
+      // Only auto-clean fragments when room is moderately filled —
+      // at low density, reject disconnecting erases to preserve room space
+      const eraseDensity = ctx.roomTiles.length > 0 ? ctx.occupiedCount / ctx.roomTiles.length : 0;
+      if (eraseDensity < 0.4 || !findAndCleanFragments(ctx, move)) return false;
+    }
     if (!checkWalkabilityOpt(ctx)) return false;
   }
   if (move.type === "ADD_ROOM") {
@@ -2368,10 +2550,13 @@ function revertMove(ctx, move) {
     }
 
     case "ERASE": {
-      ctx.room[move.row][move.col] = true;
-      ctx.roomTiles.push({ r: move.row, c: move.col });
-      ctx.roomTileSet.add(move.row * ctx.gridW + move.col);
-      markStabilityDirty(ctx);
+      // Restore auto-cleaned fragment tiles first
+      if (move.autoCleanedTiles) {
+        for (const { r, c } of move.autoCleanedTiles) {
+          restoreRoomTile(ctx, r, c);
+        }
+      }
+      restoreRoomTile(ctx, move.row, move.col);
       break;
     }
 
@@ -2453,6 +2638,75 @@ async function polishPhase(ctx) {
         setOccupancy(ctx, pi);
       }
     }
+  }
+
+  await yieldToUI();
+
+  // Sub-pass A2: Greedy squeeze — slide pieces toward centroid to consolidate space
+  for (let round = 0; round < 3; round++) {
+    // Compute centroid of all placements
+    let centR = 0, centC = 0, centN = 0;
+    for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
+      const p = ctx.placements[pi];
+      centR += p.row;
+      centC += p.col;
+      centN++;
+    }
+    if (centN === 0) break;
+    centR /= centN;
+    centC /= centN;
+
+    let anyMoved = false;
+    const currentScore = scoreLayoutSA(ctx);
+
+    for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
+      const p = ctx.placements[pi];
+      const dr = Math.sign(centR - p.row);
+      const dc = Math.sign(centC - p.col);
+      if (dr === 0 && dc === 0) continue;
+
+      const shifts = [];
+      if (dr !== 0) shifts.push([dr, 0]);
+      if (dc !== 0) shifts.push([0, dc]);
+      if (dr !== 0 && dc !== 0) shifts.push([dr, dc]);
+
+      let moved = false;
+      for (const [sr, sc] of shifts) {
+        clearOccupancy(ctx, pi);
+        const origRow = p.row, origCol = p.col;
+        p.row += sr;
+        p.col += sc;
+
+        const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+        let fits = true;
+        for (let r = 0; r < tiles.length && fits; r++) {
+          for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+            if (tiles[r][c] === null) continue;
+            const gr = p.row + r, gc = p.col + c;
+            if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
+            else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+          }
+        }
+
+        if (fits) {
+          setOccupancy(ctx, pi);
+          const newScore = scoreLayoutSA(ctx);
+          if (newScore >= currentScore && checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx)) {
+            anyMoved = true;
+            moved = true;
+            break; // keep this shift
+          }
+          clearOccupancy(ctx, pi);
+        }
+
+        p.row = origRow;
+        p.col = origCol;
+        setOccupancy(ctx, pi);
+      }
+      // moved is used to break out of shift loop only
+      void moved;
+    }
+    if (!anyMoved) break;
   }
 
   await yieldToUI();
