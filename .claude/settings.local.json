@@ -1,13 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch",
-      "WebFetch(domain:songsofsyx.com)",
-      "Bash(unzip:*)",
-      "Bash(for f in MINE_STONE MINE_COAL MINE_CLAY MINE_GEM MINE_ORE MINE_SITHILON)",
-      "Bash(do echo \"=== $f ===\")",
-      "Bash(done)",
-      "Bash(node -e:*)"
+
     ]
   }
 }

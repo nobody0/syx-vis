@@ -1,5 +1,5 @@
 // Room Planner Auto-Optimizer — simulated annealing placement with constraint checking
-import { AVAIL_BLOCKING, getRotatedTiles, getAllowedRotations, DIRS } from "./planner.js";
+import { AVAIL_BLOCKING, getRotatedTiles, getAllowedRotations, DIRS } from "./planner-core.js";
 
 const DIRS8 = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
 const SUPPORT_RADIUS = 4;
@@ -151,6 +151,28 @@ function createContext(input) {
   const clonedDoors = new Set(doors);
   const lockedCount = clonedPlacements.length;
   const primaryStatIdx = findPrimaryStatIndex(furnitureSet, building);
+
+  // Detect relative stat indices that have at least one contributing group.
+  // Skip stats where no group provides positive contribution (e.g. employeesRelative
+  // with all-zero item stats) — penalizing an unsatisfiable stat would discourage
+  // placing primary items.
+  const relativeIndices = [];
+  if (furnitureSet.stats && building.items) {
+    for (let i = 0; i < furnitureSet.stats.length; i++) {
+      const s = furnitureSet.stats[i];
+      if (s.type === "relative" || s.type === "employeesRelative") {
+        let hasContributor = false;
+        for (const bItem of building.items) {
+          if (bItem?.stats && (bItem.stats[i] ?? 0) > 0) {
+            hasContributor = true;
+            break;
+          }
+        }
+        if (hasContributor) relativeIndices.push({ statIdx: i });
+      }
+    }
+  }
+
   const baseSeed = hashSeed(`${building.id}_${gridW}_${gridH}_${roomCount}`);
 
   const ctx = {
@@ -163,6 +185,7 @@ function createContext(input) {
     doors: clonedDoors,
     lockedCount,
     primaryStatIdx,
+    relativeIndices,
     occupancy: null,
     // Seeded PRNG
     rng: createRNG(baseSeed),
@@ -378,10 +401,11 @@ function scoreLayoutSA(ctx) {
   const stats = computeStats(ctx);
   const primary = stats[ctx.primaryStatIdx] ?? 0;
 
-  // Secondary stats (excluding efficiency which is handled separately)
+  // Secondary stats (excluding efficiency and relative which are handled separately)
+  const relIdxSet = new Set(ctx.relativeIndices.map(rel => rel.statIdx));
   let secondary = 0;
   for (let i = 0; i < stats.length; i++) {
-    if (i !== ctx.primaryStatIdx && i !== ctx.effIdx) secondary += stats[i];
+    if (i !== ctx.primaryStatIdx && i !== ctx.effIdx && !relIdxSet.has(i)) secondary += stats[i];
   }
 
   // Total build cost
@@ -407,6 +431,18 @@ function scoreLayoutSA(ctx) {
     if (eff < emp) {
       const deficit = emp - eff;
       effPenalty = deficit * deficit * 1000;
+    }
+  }
+
+  // Relative stats: bonus for coverage, quadratic penalty for deficit
+  let relBonus = 0, relPenalty = 0;
+  for (const rel of ctx.relativeIndices) {
+    const primaryVal = stats[ctx.primaryStatIdx] ?? 0;
+    const relVal = stats[rel.statIdx] ?? 0;
+    relBonus += Math.min(relVal, primaryVal) * 500;
+    if (relVal < primaryVal) {
+      const deficit = primaryVal - relVal;
+      relPenalty += deficit * deficit * 200;
     }
   }
 
@@ -483,9 +519,9 @@ function scoreLayoutSA(ctx) {
     if (runLen >= 3) walkwayBonus += runLen;
   }
 
-  return primary * 1000 + secondary + effBonus + packingBonus
+  return primary * 1000 + secondary + effBonus + relBonus + packingBonus
          + alignBonus * 2 + walkwayBonus * 0.5
-         - totalCost * 0.001 - effPenalty
+         - totalCost * 0.001 - effPenalty - relPenalty
          - stabilityPenalty - roomPenalty;
 }
 
@@ -1036,6 +1072,7 @@ function analyzePhase(ctx) {
     const bItem = bld.items?.[gi];
     let hasPrimary = false;
     let hasEfficiency = false;
+    let hasRelative = false;
     let isDecorative = true;
 
     if (bItem?.stats) {
@@ -1044,9 +1081,13 @@ function analyzePhase(ctx) {
           isDecorative = false;
           if (s === ctx.primaryStatIdx) hasPrimary = true;
           if (s === ctx.effIdx) hasEfficiency = true;
+          if (ctx.relativeIndices.some(rel => rel.statIdx === s)) hasRelative = true;
         }
       }
     }
+
+    // Relative-contributing groups are not decorative
+    if (hasRelative) isDecorative = false;
 
     // Check if group has blocking tiles or storage tiles
     let hasBlockers = false;
@@ -1062,11 +1103,11 @@ function analyzePhase(ctx) {
       }
     }
 
-    // Priority: required > primary-stat > efficiency > decorative
+    // Priority: required > primary-stat > efficiency/relative > decorative
     let priority = 3;
     if (group.min > 0) priority = 0;
     else if (hasPrimary) priority = 1;
-    else if (hasEfficiency) priority = 2;
+    else if (hasEfficiency || hasRelative) priority = 2;
 
     // Hero item analysis: identify high-density items vs fillers
     const densities = group.items.map((_, ii) => ({
@@ -1087,7 +1128,7 @@ function analyzePhase(ctx) {
     const bestHeroIdx = heroItems.length > 0 ? heroItems[0].ii : -1;
 
     ctx.groupInfo.push({
-      groupIdx: gi, isDecorative, hasPrimary, hasEfficiency, hasBlockers, isStorage, priority,
+      groupIdx: gi, isDecorative, hasPrimary, hasEfficiency, hasRelative, hasBlockers, isStorage, priority,
       heroItems: heroItems.map(h => h.ii),
       bestHeroIdx,
       fillerItems: fillerItems.map(f => f.ii),
@@ -1205,6 +1246,15 @@ function getValueDensity(ctx, gi, ii) {
     if (effContrib > 0) return (effContrib * 10) / tileCount;
   }
 
+  // If group has no primary stat but HAS relative stats, use relative density (scaled 8x)
+  if (statContrib === 0 && ctx.relativeIndices.length > 0) {
+    let relContrib = 0;
+    for (const rel of ctx.relativeIndices) {
+      relContrib += (bItem.stats[rel.statIdx] ?? 0) * mult;
+    }
+    if (relContrib > 0) return (relContrib * 8) / tileCount;
+  }
+
   return statContrib / tileCount;
 }
 
@@ -1268,6 +1318,11 @@ async function constructivePhase(ctx, skipInterval) {
       continue;
     }
 
+    // Pure relative groups handled by interleaving
+    if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) {
+      continue;
+    }
+
     let placed = countGroupPlacements(ctx, gi);
     const rots = getAllowedRotations(group);
 
@@ -1322,6 +1377,9 @@ async function constructivePhase(ctx, skipInterval) {
             if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
               placeEfficiencyItems(ctx, fs);
             }
+            if (ctx.relativeIndices.length > 0) {
+              placeRelativeItems(ctx, fs);
+            }
           }
         }
       }
@@ -1337,6 +1395,11 @@ async function constructivePhase(ctx, skipInterval) {
     const maxPlacements = group.max ?? 100;
 
     if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) {
+      continue;
+    }
+
+    // Skip pure relative groups in filler pass too
+    if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) {
       continue;
     }
 
@@ -1378,6 +1441,9 @@ async function constructivePhase(ctx, skipInterval) {
             if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
               placeEfficiencyItems(ctx, fs);
             }
+            if (ctx.relativeIndices.length > 0) {
+              placeRelativeItems(ctx, fs);
+            }
           }
         }
       }
@@ -1389,6 +1455,11 @@ async function constructivePhase(ctx, skipInterval) {
   // Final efficiency pass
   if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
     placeEfficiencyItems(ctx, fs);
+  }
+
+  // Final relative pass
+  if (ctx.relativeIndices.length > 0) {
+    placeRelativeItems(ctx, fs);
   }
 }
 
@@ -1443,6 +1514,79 @@ function placeEfficiencyItems(ctx, fs) {
       }
       const st = computeStats(ctx);
       if (st[ctx.effIdx] >= st[ctx.empIdx]) return;
+    }
+  }
+}
+
+/** Place relative-stat items until relVal >= primaryVal for all relative stats, or no more can fit. */
+function placeRelativeItems(ctx, fs) {
+  if (ctx.relativeIndices.length === 0) return;
+  const stats = computeStats(ctx);
+  const primaryVal = stats[ctx.primaryStatIdx] ?? 0;
+  // Check if all relative stats already meet target
+  let allMet = true;
+  for (const rel of ctx.relativeIndices) {
+    if ((stats[rel.statIdx] ?? 0) < primaryVal) { allMet = false; break; }
+  }
+  if (allMet) return;
+
+  for (const gInfo of ctx.groupInfo) {
+    if (!gInfo.hasRelative) continue;
+    // Skip groups that also contribute primary stat — they're placed in the main loop
+    if (gInfo.hasPrimary) continue;
+    const gi = gInfo.groupIdx;
+    const group = fs.groups[gi];
+    const maxP = group.max ?? 100;
+    let placed = countGroupPlacements(ctx, gi);
+
+    const rots = getAllowedRotations(group);
+    // Rank items by relative density (highest first)
+    const rankedItems = group.items.map((_, ii) => ({
+      ii,
+      density: getValueDensity(ctx, gi, ii),
+    })).sort((a, b) => b.density - a.density);
+
+    for (const { ii } of rankedItems) {
+      if (placed >= maxP) break;
+      for (const rot of rots) {
+        if (placed >= maxP) break;
+        let bestPos = null;
+        let bestScore = -Infinity;
+        for (const { r, c } of ctx.roomTiles) {
+          if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
+          const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
+          if (posScore > bestScore) {
+            bestScore = posScore;
+            bestPos = { rot, row: r, col: c };
+          }
+        }
+        if (bestPos) {
+          const pi = ctx.placements.length;
+          ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: bestPos.rot, row: bestPos.row, col: bestPos.col });
+          setOccupancy(ctx, pi);
+
+          if (!hasAnyDoorCandidate(ctx) || !checkWalkabilityOpt(ctx)) {
+            clearOccupancy(ctx, pi);
+            ctx.placements.pop();
+          } else {
+            placed++;
+            const st = computeStats(ctx);
+            const pv = st[ctx.primaryStatIdx] ?? 0;
+            let done = true;
+            for (const rel of ctx.relativeIndices) {
+              if ((st[rel.statIdx] ?? 0) < pv) { done = false; break; }
+            }
+            if (done) return;
+          }
+        }
+      }
+      const st = computeStats(ctx);
+      const pv = st[ctx.primaryStatIdx] ?? 0;
+      let done = true;
+      for (const rel of ctx.relativeIndices) {
+        if ((st[rel.statIdx] ?? 0) < pv) { done = false; break; }
+      }
+      if (done) return;
     }
   }
 }
@@ -2321,6 +2465,10 @@ async function polishPhase(ctx) {
       if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) {
         continue;
       }
+      // Skip pure relative groups — handled by sub-pass D
+      if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) {
+        continue;
+      }
 
       const gi = gInfo.groupIdx;
       const group = fs.groups[gi];
@@ -2376,6 +2524,11 @@ async function polishPhase(ctx) {
   // Sub-pass C: Final efficiency rebalance
   if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
     placeEfficiencyItems(ctx, ctx.furnitureSet);
+  }
+
+  // Sub-pass D: Final relative rebalance
+  if (ctx.relativeIndices.length > 0) {
+    placeRelativeItems(ctx, ctx.furnitureSet);
   }
 }
 
