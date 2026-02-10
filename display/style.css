@@ -2767,46 +2767,6 @@ body:has(.focus-bar) #breadcrumb-bar {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
 }
 
-.planner-dims {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-left: 10px;
-  border-left: 1px solid var(--border-subtle);
-}
-
-.planner-dim-input {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.planner-dim-label {
-  font-weight: 500;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.planner-dim-input input[type="number"] {
-  width: 52px;
-  padding: 5px 4px;
-  background: var(--bg-input);
-  border: 1px solid var(--border-medium);
-  border-radius: 3px;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  text-align: center;
-  outline: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-.planner-dim-input input[type="number"]:focus {
-  border-color: var(--accent-gold-dim);
-  box-shadow: 0 0 0 2px var(--accent-gold-glow);
-}
-
 /* Actions row (below selector) */
 .planner-actions {
   display: flex;
@@ -3174,6 +3134,72 @@ body:has(.focus-bar) #breadcrumb-bar {
   outline: 2px solid rgba(210, 50, 50, 0.8);
   outline-offset: -2px;
   background: rgba(210, 50, 50, 0.20) !important;
+}
+
+/* Hover outline on placed furniture */
+.cell-hover-outline {
+  outline: 2px solid rgba(79, 195, 247, 0.8);
+  outline-offset: -1px;
+  z-index: 1;
+}
+
+/* Custom tooltip for hovered furniture */
+.planner-tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 100;
+  background: rgba(10, 14, 22, 0.92);
+  border: 1px solid rgba(79, 195, 247, 0.35);
+  border-radius: 5px;
+  padding: 6px 10px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  max-width: 240px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  display: none;
+}
+.planner-tooltip .tip-label {
+  font-weight: 600;
+  color: rgba(79, 195, 247, 0.95);
+  margin-bottom: 2px;
+}
+.planner-tooltip .tip-detail {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+/* Reverse palette highlight when hovering furniture on grid */
+.thumb-hover-from-grid {
+  border-color: rgba(79, 195, 247, 0.8) !important;
+  box-shadow: 0 0 8px rgba(79, 195, 247, 0.3);
+}
+
+/* Live room dimension label */
+.planner-dim-label-live {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(180, 200, 220, 0.7);
+  background: rgba(10, 16, 24, 0.65);
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+/* Drag cursor feedback */
+.planner-grid.drag-cursor .cell-furniture {
+  cursor: grab;
+}
+.planner-grid.dragging {
+  cursor: grabbing !important;
+}
+.planner-grid.dragging * {
+  cursor: grabbing !important;
 }
 
 .planner-feedback {

@@ -98,15 +98,50 @@ function preloadBuildingSprites(buildingId, building) {
 //   [numPlacements:1] ([groupIdx:1] [itemIdx:1] [rotation:1] [row:1] [col:1]) ×N
 //   [numDoors:1] ([row:1] [col:1]) ×N
 
+/** Compute bounding box of room tiles + 1-cell wall margin, returning trimmed sub-region. */
+function trimGrid() {
+  let minR = state.gridH, maxR = -1, minC = state.gridW, maxC = -1;
+  for (let r = 0; r < state.gridH; r++) {
+    for (let c = 0; c < state.gridW; c++) {
+      if (state.room[r][c]) {
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+        if (c < minC) minC = c;
+        if (c > maxC) maxC = c;
+      }
+    }
+  }
+  if (maxR < 0) return { offR: 0, offC: 0, w: state.gridW, h: state.gridH, room: state.room };
+  // Add 1-cell margin for walls, clamped to grid bounds
+  minR = Math.max(0, minR - 1);
+  maxR = Math.min(state.gridH - 1, maxR + 1);
+  minC = Math.max(0, minC - 1);
+  maxC = Math.min(state.gridW - 1, maxC + 1);
+  const tw = maxC - minC + 1;
+  const th = maxR - minR + 1;
+  const trimmedRoom = [];
+  for (let r = minR; r <= maxR; r++) {
+    const row = [];
+    for (let c = minC; c <= maxC; c++) {
+      row.push(state.room[r][c]);
+    }
+    trimmedRoom.push(row);
+  }
+  return { offR: minR, offC: minC, w: tw, h: th, room: trimmedRoom };
+}
+
 /** Serialize current planner state to a binary Uint8Array (no version byte). */
 function serializeToBinary() {
-  const doorList = [...state.doors].map(k => k.split(",").map(Number));
-  const placements = state.placements.map(p => [p.groupIdx, p.itemIdx, p.rotation, p.row, p.col]);
+  const trim = trimGrid();
+  const doorList = [...state.doors].map(k => k.split(",").map(Number))
+    .map(([r, c]) => [r - trim.offR, c - trim.offC]);
+  const placements = state.placements.map(p =>
+    [p.groupIdx, p.itemIdx, p.rotation, p.row - trim.offR, p.col - trim.offC]);
   return serializePlanObj({
     b: state.buildingId,
-    w: state.gridW,
-    h: state.gridH,
-    room: state.room,
+    w: trim.w,
+    h: trim.h,
+    room: trim.room,
     placements,
     doors: doorList,
   });
@@ -205,32 +240,41 @@ function restoreFromPlanObj(obj) {
   w = Math.max(5, Math.min(40, w));
   h = Math.max(5, Math.min(40, h));
 
+  // Compute offset to center smaller plans in the 40x40 canvas
+  const offR = Math.floor((state.gridH - h) / 2);
+  const offC = Math.floor((state.gridW - w) / 2);
+
   // Suppress route/localStorage clearing during restoration
   _restoring = true;
   try {
     selectBuilding(bid);
-    state.gridW = w;
-    state.gridH = h;
 
-    // Restore room grid
+    // Restore room grid, centered if plan is smaller than canvas
     if (obj.room) {
-      state.room = obj.room;
+      for (let r = 0; r < h && r < obj.room.length; r++) {
+        for (let c = 0; c < w && c < (obj.room[r]?.length ?? 0); c++) {
+          if (obj.room[r][c]) state.room[r + offR][c + offC] = true;
+        }
+      }
     }
 
-    // Restore doors
+    // Restore doors (shifted by offset)
     state.doors = new Set();
     if (Array.isArray(obj.doors)) {
       for (const pair of obj.doors) {
         if (Array.isArray(pair) && pair.length === 2) {
           const [r, c] = pair.map(Number);
-          if (r >= 0 && r < h && c >= 0 && c < w && !state.room[r]?.[c]) {
-            state.doors.add(`${r},${c}`);
+          if (r >= 0 && r < h && c >= 0 && c < w) {
+            const gr = r + offR, gc = c + offC;
+            if (!state.room[gr]?.[gc]) {
+              state.doors.add(`${gr},${gc}`);
+            }
           }
         }
       }
     }
 
-    // Restore placements
+    // Restore placements (shifted by offset)
     state.placements = [];
     const fs = state.furnitureSet;
     if (Array.isArray(obj.placements) && fs) {
@@ -241,7 +285,7 @@ function restoreFromPlanObj(obj) {
         if (ii < 0 || ii >= fs.groups[gi].items.length) continue;
         if (rot < 0 || rot > 3) continue;
         if (row < 0 || row >= h || col < 0 || col >= w) continue;
-        state.placements.push({ groupIdx: gi, itemIdx: ii, rotation: rot, row, col });
+        state.placements.push({ groupIdx: gi, itemIdx: ii, rotation: rot, row: row + offR, col: col + offC });
       }
     }
 
@@ -255,8 +299,15 @@ function restoreFromPlanObj(obj) {
     refreshInfoPanel();
     updateToolbarActive();
     updateOptimizeBtn();
-    updateDimensionInputs(w, h);
     updateAutocompleteValue(bid);
+
+    // Auto-scroll to center the restored content
+    if (gridParent) {
+      requestAnimationFrame(() => {
+        gridParent.scrollLeft = (gridParent.scrollWidth - gridParent.clientWidth) / 2;
+        gridParent.scrollTop = (gridParent.scrollHeight - gridParent.clientHeight) / 2;
+      });
+    }
   } finally {
     _restoring = false;
   }
@@ -330,14 +381,6 @@ function unpackLegacyRoomBits(encoded, w, h) {
   return room;
 }
 
-/** Update the dimension input values in the DOM after deserialization. */
-function updateDimensionInputs(w, h) {
-  const selector = document.querySelector(".planner-selector");
-  if (!selector) return;
-  const inputs = selector.querySelectorAll(".planner-dim-input input");
-  if (inputs[0]) inputs[0].value = String(w);
-  if (inputs[1]) inputs[1].value = String(h);
-}
 
 /** Update the autocomplete input to show the building name after deserialization. */
 function updateAutocompleteValue(buildingId) {
@@ -397,8 +440,8 @@ const state = {
   buildingId: null,
   building: null,
   furnitureSet: null,
-  gridW: 20,
-  gridH: 15,
+  gridW: 40,
+  gridH: 40,
   room: [],          // boolean[][] — true = room tile
   placements: [],    // {groupIdx, itemIdx, rotation, row, col}
   mode: "draw",      // "draw"|"erase"|"remove"|"place"|"door"
@@ -958,6 +1001,13 @@ function checkWalkability() {
   };
 }
 
+// ── Hover / drag state ───────────────────────────────────
+
+let hoveredPlacementIdx = -1;
+let tooltipEl = null;
+let dimLabelEl = null;
+let dragging = null; // { placementIdx, origRow, origCol, origPlacement, offsetR, offsetC }
+
 // ── Cursor tracking (for preview refresh on rotation/size change) ────
 
 let lastHoverRow = -1, lastHoverCol = -1;
@@ -1007,15 +1057,63 @@ function buildGrid(container) {
     if (!cell) return;
     const r = Number(cell.dataset.r), c = Number(cell.dataset.c);
 
-    // Right-click = undo (all modes)
+    // 1. Right-click = undo (all modes)
     if (e.button === 2) { undo(); return; }
 
-    // Shift+click = remove furniture (all modes)
+    // 2. Shift+click = remove furniture (all modes)
     if (e.shiftKey && e.button === 0) {
       removeFurnitureAt(r, c);
       return;
     }
 
+    // 3. Ctrl+click on furniture = copy (enter place mode with same item)
+    if (e.ctrlKey && e.button === 0 && state.mode !== "place") {
+      const pi = getPlacementAt(r, c);
+      if (pi !== null) {
+        const p = state.placements[pi];
+        state.selectedGroupIdx = p.groupIdx;
+        state.selectedItemIdx = p.itemIdx;
+        state.rotation = p.rotation;
+        state.mode = "place";
+        updateToolbarActive();
+        refreshPalette();
+        clearHoverFeedback();
+        showPreview(r, c);
+        return;
+      }
+    }
+
+    // 4. Click on furniture in draw/erase = start drag
+    if ((state.mode === "draw" || state.mode === "erase") && e.button === 0 && !e.ctrlKey) {
+      const pi = getPlacementAt(r, c);
+      if (pi !== null) {
+        const p = state.placements[pi];
+        pushUndo();
+        dragging = {
+          origPlacement: { ...p },
+          groupIdx: p.groupIdx,
+          itemIdx: p.itemIdx,
+          rotation: p.rotation,
+          offsetR: r - p.row,
+          offsetC: c - p.col,
+        };
+        // Remove from placements so preview can be shown freely
+        state.placements.splice(pi, 1);
+        state.selectedGroupIdx = p.groupIdx;
+        state.selectedItemIdx = p.itemIdx;
+        state.rotation = p.rotation;
+        computeStats();
+        refreshGrid();
+        refreshPalette();
+        refreshStats();
+        clearHoverFeedback();
+        gridEl.classList.add("dragging");
+        showPreview(r, c);
+        return;
+      }
+    }
+
+    // 5. Standard mode handlers
     if (state.mode === "place") {
       attemptPlace(r, c);
       return;
@@ -1048,10 +1146,34 @@ function buildGrid(container) {
     lastHoverRow = r;
     lastHoverCol = c;
 
+    // Dragging: update preview ghost
+    if (dragging) {
+      clearPreview();
+      showPreview(r, c);
+      return;
+    }
+
     // Shift-hover or remove mode: highlight furniture under cursor for removal
     clearRemoveHighlight();
     if (e.shiftKey || state.mode === "remove") {
+      clearHoverFeedback();
       showRemoveHighlight(r, c);
+    } else if (state.mode === "place") {
+      // Place-mode preview (suppress hover feedback)
+      clearHoverFeedback();
+      if (e.shiftKey) {
+        clearPreview();
+      } else {
+        showPreview(r, c);
+      }
+    } else if (!painting && !rectStart) {
+      // Hover feedback in idle draw/erase/door modes
+      showHoverFeedback(r, c);
+      if (hoveredPlacementIdx >= 0) {
+        showTooltip(e, hoveredPlacementIdx);
+      } else {
+        hideTooltip();
+      }
     }
 
     if (rectStart) {
@@ -1059,16 +1181,46 @@ function buildGrid(container) {
     } else if (painting) {
       paintCell(r, c, paintValue);
     }
-    if (state.mode === "place") {
-      if (e.shiftKey) {
-        clearPreview();
-      } else {
-        showPreview(r, c);
-      }
-    }
   });
 
   gridEl.addEventListener("mouseup", (e) => {
+    // Drag drop
+    if (dragging) {
+      const cell = e.target.closest(".planner-cell");
+      let placed = false;
+      if (cell) {
+        const r = Number(cell.dataset.r), c = Number(cell.dataset.c);
+        const item = state.furnitureSet.groups[dragging.groupIdx].items[dragging.itemIdx];
+        const origin = getCenteredOrigin(item, dragging.rotation, r, c);
+        const result = canPlace(dragging.groupIdx, dragging.itemIdx, dragging.rotation, origin.row, origin.col);
+        if (result.ok) {
+          state.placements.push({
+            groupIdx: dragging.groupIdx,
+            itemIdx: dragging.itemIdx,
+            rotation: dragging.rotation,
+            row: origin.row,
+            col: origin.col,
+          });
+          placed = true;
+        }
+      }
+      if (!placed) {
+        // Undo: restore the piece
+        undo();
+      } else {
+        computeStats();
+        refreshGrid();
+        refreshPalette();
+        refreshStats();
+        refreshValidation();
+        syncUrl();
+      }
+      clearPreview();
+      gridEl.classList.remove("dragging");
+      dragging = null;
+      return;
+    }
+
     if (rectStart) {
       const cell = e.target.closest(".planner-cell");
       if (cell) {
@@ -1088,8 +1240,18 @@ function buildGrid(container) {
       syncUrl();
     }
   });
+
   gridEl.addEventListener("mouseleave", () => {
     lastHoverRow = lastHoverCol = -1;
+
+    // Cancel drag on leave
+    if (dragging) {
+      undo();
+      clearPreview();
+      gridEl.classList.remove("dragging");
+      dragging = null;
+    }
+
     if (rectStart) {
       rectStart = null;
       clearRectPreview();
@@ -1105,6 +1267,7 @@ function buildGrid(container) {
     }
     clearPreview();
     clearRemoveHighlight();
+    clearHoverFeedback();
   });
 
   gridEl.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -1122,6 +1285,11 @@ function buildGrid(container) {
     refreshPalette();
     if (lastHoverRow >= 0) showPreview(lastHoverRow, lastHoverCol);
   }, { passive: false });
+
+  // Dimension label (floating overlay inside grid)
+  dimLabelEl = el("div", "planner-dim-label-live");
+  dimLabelEl.style.display = "none";
+  gridEl.appendChild(dimLabelEl);
 
   container.appendChild(gridEl);
 }
@@ -1239,9 +1407,7 @@ function updateCellVisual(r, c) {
           cell.appendChild(el("span", "cell-reachable-dot"));
         }
 
-        // Tooltip: group name + reachability
-        const groupLabel = getGroupLabel(state.furnitureSet, state.building, p.groupIdx);
-        cell.title = groupLabel + (tt.mustBeReachable ? " \u2014 needs walkable neighbor" : "");
+        // No native title — custom tooltip handles hover feedback
       }
     }
     // Outline edges where this piece borders non-same-placement tiles
@@ -1275,6 +1441,7 @@ function refreshGrid() {
       updateCellVisual(r, c);
     }
   }
+  updateDimLabel();
 }
 
 // ── Preview ghost ───────────────────────────────────────
@@ -1372,6 +1539,148 @@ function clearRemoveHighlight() {
       if (cell) cell.classList.remove("cell-remove-target");
     }
   }
+}
+
+// ── Hover outline + tooltip + reverse palette highlight ──
+
+function showHoverFeedback(r, c) {
+  const pi = getPlacementAt(r, c);
+  if (pi === hoveredPlacementIdx) return;
+  clearHoverFeedback();
+  hoveredPlacementIdx = pi;
+  if (pi === null) return;
+
+  const p = state.placements[pi];
+  const fs = state.furnitureSet;
+  const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
+  if (!item) return;
+  const tiles = getRotatedTiles(item, p.rotation);
+
+  // Outline all tiles of this placement
+  for (let tr = 0; tr < tiles.length; tr++) {
+    for (let tc = 0; tc < (tiles[tr]?.length ?? 0); tc++) {
+      if (tiles[tr][tc] === null) continue;
+      const cell = cellEls[p.row + tr]?.[p.col + tc];
+      if (cell) cell.classList.add("cell-hover-outline");
+    }
+  }
+
+  // Reverse palette highlight
+  highlightPaletteFromGrid(p.groupIdx, p.itemIdx);
+}
+
+function clearHoverFeedback() {
+  if (hoveredPlacementIdx === -1) return;
+  hoveredPlacementIdx = -1;
+  // Clear outline
+  const outlined = gridEl?.querySelectorAll(".cell-hover-outline");
+  if (outlined) outlined.forEach(c => c.classList.remove("cell-hover-outline"));
+  // Clear palette highlight
+  clearPaletteGridHighlight();
+  // Hide tooltip
+  hideTooltip();
+}
+
+function showTooltip(e, pi) {
+  if (!tooltipEl) return;
+  const p = state.placements[pi];
+  const fs = state.furnitureSet;
+  const bld = state.building;
+  const group = fs.groups[p.groupIdx];
+  const item = group.items[p.itemIdx];
+  if (!item) return;
+
+  const label = getGroupLabel(fs, bld, p.groupIdx);
+  const tiles = getRotatedTiles(item, p.rotation);
+  const rows = tiles.length;
+  const cols = Math.max(...tiles.map(r => r.length));
+  const mult = item.multiplierStats ?? item.multiplier;
+
+  let html = `<div class="tip-label">${label}</div>`;
+  html += `<div class="tip-detail">${cols}\u00d7${rows} tiles, \u00d7${mult} multiplier</div>`;
+
+  // Stat contributions
+  if (fs.stats && bld?.items?.[p.groupIdx]) {
+    const bItem = bld.items[p.groupIdx];
+    for (let s = 0; s < bItem.stats.length && s < fs.stats.length; s++) {
+      if (bItem.stats[s] === 0) continue;
+      const val = bItem.stats[s] * mult;
+      const statName = getStatDisplayName(fs.stats[s]);
+      const sign = val > 0 ? "+" : "";
+      html += `<div class="tip-detail">${statName}: ${sign}${val.toFixed(1)}</div>`;
+    }
+  }
+
+  tooltipEl.innerHTML = html;
+  tooltipEl.style.display = "block";
+  positionTooltip(e);
+}
+
+function positionTooltip(e) {
+  if (!tooltipEl) return;
+  let x = e.clientX + 15;
+  let y = e.clientY + 10;
+  // Clamp to viewport
+  const rect = tooltipEl.getBoundingClientRect();
+  if (x + rect.width > window.innerWidth - 8) x = e.clientX - rect.width - 8;
+  if (y + rect.height > window.innerHeight - 8) y = e.clientY - rect.height - 8;
+  tooltipEl.style.left = x + "px";
+  tooltipEl.style.top = y + "px";
+}
+
+function hideTooltip() {
+  if (tooltipEl) tooltipEl.style.display = "none";
+}
+
+function highlightPaletteFromGrid(groupIdx, itemIdx) {
+  clearPaletteGridHighlight();
+  if (!paletteEl) return;
+  const thumbs = paletteEl.querySelectorAll(".planner-thumb");
+  let thumbIdx = 0;
+  const fs = state.furnitureSet;
+  for (let gi = 0; gi < fs.groups.length; gi++) {
+    for (let ii = 0; ii < fs.groups[gi].items.length; ii++) {
+      if (gi === groupIdx && ii === itemIdx && thumbs[thumbIdx]) {
+        thumbs[thumbIdx].classList.add("thumb-hover-from-grid");
+        thumbs[thumbIdx].scrollIntoView({ block: "nearest", behavior: "smooth" });
+        return;
+      }
+      thumbIdx++;
+    }
+  }
+}
+
+function clearPaletteGridHighlight() {
+  if (!paletteEl) return;
+  const highlighted = paletteEl.querySelectorAll(".thumb-hover-from-grid");
+  highlighted.forEach(t => t.classList.remove("thumb-hover-from-grid"));
+}
+
+/** Compute and show/hide the live room dimension label. */
+function updateDimLabel() {
+  if (!dimLabelEl || !gridEl) return;
+  let minR = state.gridH, maxR = -1, minC = state.gridW, maxC = -1;
+  for (let r = 0; r < state.gridH; r++) {
+    for (let c = 0; c < state.gridW; c++) {
+      if (state.room[r][c]) {
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+        if (c < minC) minC = c;
+        if (c > maxC) maxC = c;
+      }
+    }
+  }
+  if (maxR < 0) {
+    dimLabelEl.style.display = "none";
+    return;
+  }
+  const rw = maxC - minC + 1;
+  const rh = maxR - minR + 1;
+  dimLabelEl.textContent = `${rw}\u00d7${rh}`;
+  // Position at bottom-right of bounding box. Each cell = 24px + 1px gap = 25px.
+  dimLabelEl.style.left = ((maxC + 1) * 25 + 2) + "px";
+  dimLabelEl.style.top = ((maxR + 1) * 25 + 2) + "px";
+  dimLabelEl.style.display = "";
 }
 
 // ── Placement actions ───────────────────────────────────
@@ -2017,11 +2326,18 @@ function buildToolbar(container) {
   // Separator
   modeRow.appendChild(el("span", "planner-toolbar-sep"));
 
-  // Remove hint (Shift+Click)
+  // Hints
   const removeHint = el("span", "planner-remove-hint");
   removeHint.appendChild(document.createTextNode("Remove: "));
   removeHint.appendChild(elText("kbd", "Shift+Click", "planner-kbd"));
   modeRow.appendChild(removeHint);
+
+  const moveHint = el("span", "planner-remove-hint");
+  moveHint.appendChild(document.createTextNode("Move: "));
+  moveHint.appendChild(elText("kbd", "Drag", "planner-kbd"));
+  moveHint.appendChild(document.createTextNode("  Copy: "));
+  moveHint.appendChild(elText("kbd", "Ctrl+Click", "planner-kbd"));
+  modeRow.appendChild(moveHint);
 
   // Separator
   modeRow.appendChild(el("span", "planner-toolbar-sep"));
@@ -2096,6 +2412,10 @@ function updateToolbarActive() {
   const shapeBar = toolbarEl.querySelector(".planner-shape-bar");
   if (shapeBar) {
     shapeBar.style.display = (state.mode === "draw" || state.mode === "erase") ? "" : "none";
+  }
+  // Show grab cursor on furniture in draw/erase modes
+  if (gridEl) {
+    gridEl.classList.toggle("drag-cursor", state.mode === "draw" || state.mode === "erase");
   }
   updateShapeActive();
 }
@@ -2270,14 +2590,6 @@ function buildSelector(container) {
     showAllOnEmpty: true,
   });
 
-  // Grid dimension controls
-  const dimsWrap = el("span", "planner-dims");
-  const wInput = buildDimInput("W", state.gridW, 5, 40, (v) => { state.gridW = v; rebuildGrid(); });
-  const hInput = buildDimInput("H", state.gridH, 5, 40, (v) => { state.gridH = v; rebuildGrid(); });
-  dimsWrap.appendChild(wInput);
-  dimsWrap.appendChild(hInput);
-  selectorWrap.appendChild(dimsWrap);
-
   container.appendChild(selectorWrap);
 
   // Actions row (below selector)
@@ -2320,43 +2632,10 @@ function buildSelector(container) {
   container.appendChild(actionsRow);
 }
 
-function buildDimInput(label, value, min, max, onChange) {
-  const wrap = el("label", "planner-dim-input");
-  wrap.appendChild(elText("span", label + ":", "planner-dim-label"));
-  const inp = document.createElement("input");
-  inp.type = "number";
-  inp.min = String(min);
-  inp.max = String(max);
-  inp.value = String(value);
-  inp.addEventListener("change", () => {
-    let v = parseInt(inp.value, 10);
-    if (isNaN(v) || v < min) v = min;
-    if (v > max) v = max;
-    inp.value = String(v);
-    onChange(v);
-  });
-  wrap.appendChild(inp);
-  return wrap;
-}
 
 // Reference to grid parent for rebuild
 let gridParent = null;
 
-function rebuildGrid() {
-  initRoom();
-  recomputeWallMetrics();
-  computeStats();
-  if (gridParent) {
-    buildGrid(gridParent);
-  }
-  refreshPalette();
-  refreshStats();
-  refreshValidation();
-  if (!_restoring) {
-    clearPlannerRoute();
-    try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
-  }
-}
 
 function selectBuilding(buildingId) {
   const bld = buildingById.get(buildingId);
@@ -2442,6 +2721,20 @@ function onKeyDown(e) {
   } else if (e.key === "v" || e.key === "V") {
     e.preventDefault();
     toggleSpriteView();
+  } else if (e.key >= "1" && e.key <= "9") {
+    // Number keys: quick-select furniture group and enter place mode
+    const gi = parseInt(e.key, 10) - 1;
+    if (state.furnitureSet && gi < state.furnitureSet.groups.length) {
+      state.selectedGroupIdx = gi;
+      state.selectedItemIdx = 0;
+      state.mode = "place";
+      const group = state.furnitureSet.groups[gi];
+      const allowed = getAllowedRotations(group);
+      if (!allowed.includes(state.rotation)) state.rotation = allowed[0];
+      updateToolbarActive();
+      refreshPalette();
+      if (lastHoverRow >= 0) showPreview(lastHoverRow, lastHoverCol);
+    }
   }
 }
 
@@ -2475,6 +2768,11 @@ export function renderPlanner(container) {
   gridParent = gridWrap;
   initRoom();
   buildGrid(gridWrap);
+  // Auto-scroll to center of the 40x40 grid
+  requestAnimationFrame(() => {
+    gridWrap.scrollLeft = (gridWrap.scrollWidth - gridWrap.clientWidth) / 2;
+    gridWrap.scrollTop = (gridWrap.scrollHeight - gridWrap.clientHeight) / 2;
+  });
   main.appendChild(gridWrap);
 
   const sidebar = el("div", "planner-sidebar");
@@ -2497,6 +2795,10 @@ export function renderPlanner(container) {
   buildInfoPanel(content);
 
   container.appendChild(content);
+
+  // Create persistent tooltip element
+  tooltipEl = el("div", "planner-tooltip");
+  document.body.appendChild(tooltipEl);
 
   // Apply disabled state if no building selected
   updateDisabledState();
