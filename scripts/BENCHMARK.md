@@ -108,7 +108,7 @@ Previous best — **26 workers**:
 http://localhost:3000/#planner/Aj2OSw7CMBBDZ5LmQz60VByF-yAWSCygSBUsKcftkhtQbJBYxHoeeZypp_twO4774TpeDudtKxKW93OZIS_IY5mn6Wf_IiI7PFU1UpXUkTpSA9JASqQKqpxVzmqiVLXiMxKmBzmS6xEJ-t0HeQuKpOBIPdZihm0KyJICmyObXcM1_ub5R4ggy6syCzKvMp7hNWwyoNSCCmfZM7wGNY5hlqaiTlLiVdxdeVUpG4XFgcYbSEzoz0U-
 ```
 
-### 4. Lavatory — 12x12 semi-round, 14 latrines
+### 4. Lavatory — 12x12 semi-round, 17 latrines
 
 Non-rectangular (semicircular) room shape. Tests optimizer handling of irregular geometry.
 Primary stat is services (latrines), not employees.
@@ -118,10 +118,27 @@ Starter (empty room):
 http://localhost:3000/#planner/AuPPSSxLLMkvqozPyy_KTczh4WFg-CDf_Kf--T8gsj_4g58BCAA
 ```
 
-Previous best — **14 latrines**:
+Previous best — **17 latrines**:
 ```
-http://localhost:3000/#planner/AuPPSSxLLMkvqozPyy_KTczh4WFgYOBn-MD_4J_9438gBgMDCwMrAzMrIzMTOxMDIyMLJwMjEycLAwA
+http://localhost:3000/#planner/AQ9sYXZhdG9yeV9ub3JtYWwMDAAA8A8A8A8H_n_n_h_h8B8AAAQABQACBAEFAAkEAAEBBQkABAIGAQA
 ```
+
+### 5. Lavatory — 15x15, 47 latrines
+
+a discord reported with known optimum with 56 http://localhost:3000/#planner/AuPPSSxLLMkvqozPyy_KTczh52dg-P_z_-f_z_-f_z__v_2_mho4t4GBgZeBk5GRjZGRiQtMMIEILiDBAWJxcDGwMnMzgQguBg5mRiYQARYDKmZg5wIRTAwA
+
+Starter (empty room):
+```
+http://localhost:3000/#planner/AuPPSSxLLMkvqozPyy_KTczh52dg-P_z_-f_z_-f_z__v_2_-j9wbgMDEAAA
+```
+
+Previous best — **47 latrines**:
+```
+http://localhost:3000/#planner/AuPPSSxLLMkvqozPyy_KTczh52fg-P_x_-f_z_8f_z-_3n5f_Z__P_8_BnL6_zMwMHAzsDKwMzKyM7BzAlnMIC4XFwMbIxMTAyszIxuQ4AaxuNkYWRlY2BgYmDhYGZmYmbgYAA
+```
+
+
+Previous best — **53 latrines**:
 
 ## Notes
 
