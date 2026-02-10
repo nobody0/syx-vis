@@ -208,21 +208,23 @@ function runCalculation(resourceId, rate, resultsDiv) {
   let stepNum = 0;
   for (const s of steps) {
     stepNum++;
-    const indent = "\u00a0\u00a0".repeat(s.depth || 0);
+    const depth = s.depth || 0;
+    const indent = "\u00a0\u00a0".repeat(depth);
+    const depthBar = depth > 0 ? `<span class="bal-depth-bar" style="width:${depth * 8}px"></span>` : '';
 
     if (s.terminal) {
       html.push(`<tr class="terminal-row">
-        <td class="num">${indent}${stepNum}</td>
+        <td class="num">${depthBar}${indent}${stepNum}</td>
         <td colspan="2"><span class="resource-name">${s.resourceIcon ? `<img src="data/icons/${s.resourceIcon}" alt="">` : ''}${s.resourceName}</span></td>
-        <td colspan="5" style="color:var(--state-bought);font-style:italic">BOUGHT (${formatNum(s.rate)}/day)</td>
+        <td colspan="5"><span class="bal-bought-tag">BOUGHT</span> <span style="color:var(--text-muted)">${formatNum(s.rate)}/day</span></td>
       </tr>`);
       continue;
     }
 
     if (s.warning) {
       html.push(`<tr>
-        <td class="num">${indent}${stepNum}</td>
-        <td colspan="7" style="color:var(--state-ignored)">No active producer for ${s.resourceName}</td>
+        <td class="num">${depthBar}${indent}${stepNum}</td>
+        <td colspan="7"><span class="bal-warn-tag">NO PRODUCER</span> ${s.resourceName}</td>
       </tr>`);
       continue;
     }
@@ -255,7 +257,7 @@ function runCalculation(resourceId, rate, resultsDiv) {
       ? `<input type="number" class="bal-weight-input" data-recipe-id="${s.recipe.id}" value="${curWeight}" min="0" step="0.5">`
       : `<span style="color:var(--text-muted)">\u2014</span>`;
     html.push(`<tr>
-      <td class="num">${indent}${stepNum}</td>
+      <td class="num">${depthBar}${indent}${stepNum}</td>
       <td><span class="resource-name"><img src="data/icons/${s.building.icon}" alt="">${s.building.name}</span></td>
       <td>${s.recipe.name}</td>
       <td class="num">${formatNum(s.workers)}</td>
@@ -268,18 +270,24 @@ function runCalculation(resourceId, rate, resultsDiv) {
 
   html.push(`</tbody></table>`);
 
-  // Summary: total workers (excluding terminals and warnings)
+  // Summary card: total workers + diagnostics
   const productionSteps = steps.filter(s => !s.terminal && !s.warning);
   const totalWorkers = productionSteps.reduce((sum, s) => sum + s.workers, 0);
   const boughtCount = steps.filter(s => s.terminal).length;
   const warningCount = steps.filter(s => s.warning).length;
 
-  let summaryParts = [`Total workers across chain: <strong style="color:var(--text-primary)">${formatNum(totalWorkers)}</strong>`];
-  if (boughtCount > 0) summaryParts.push(`${boughtCount} resource(s) marked as bought`);
-  if (warningCount > 0) summaryParts.push(`<span style="color:var(--state-ignored)">${warningCount} resource(s) with no active producer</span>`);
-  summaryParts.push("Workers are fractional \u2014 round up for the number of building instances needed.");
-
-  html.push(`<div class="note">${summaryParts.join(". ")}.</div>`);
+  html.push(`<div class="bal-summary-card">`);
+  html.push(`<div class="bal-summary-main">`);
+  html.push(`<span class="bal-summary-label">Total Workers</span>`);
+  html.push(`<span class="bal-summary-value">${formatNum(totalWorkers)}</span>`);
+  html.push(`</div>`);
+  html.push(`<div class="bal-summary-details">`);
+  html.push(`<span>${productionSteps.length} production step${productionSteps.length !== 1 ? "s" : ""}</span>`);
+  if (boughtCount > 0) html.push(`<span class="bal-summary-bought">${boughtCount} bought</span>`);
+  if (warningCount > 0) html.push(`<span class="bal-summary-warn">${warningCount} missing producer${warningCount !== 1 ? "s" : ""}</span>`);
+  html.push(`</div>`);
+  html.push(`<div class="bal-summary-hint">Workers are fractional \u2014 round up for building instances needed.</div>`);
+  html.push(`</div>`);
 
   resultsDiv.innerHTML = html.join("\n");
 

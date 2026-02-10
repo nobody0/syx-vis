@@ -10,13 +10,17 @@ import { createAutocomplete } from "./filters.js";
 import { runOptimizer } from "./optimizer.js";
 import { replacePlannerRoute, clearPlannerRoute } from "./router.js";
 import {
-  AVAIL_BLOCKING, AVAIL_IMPASSABLE, DIRS, getRotatedTiles, getAllowedRotations,
+  DIRS, getRotatedTiles, getAllowedRotations,
+  createRoomContext, buildOccupancyGrid, setOccupancy,
+  getPlacementAt as getPlacementAtCore,
+  canPlaceWithReason, checkWalkability as checkWalkabilityCore,
+  computeStats as computeStatsCore,
+  computeWalls as computeWallsCore,
+  computeIsolation as computeIsolationCore,
+  tileSupport, STABILITY_THRESHOLD, countGroupPlacements as countGroupPlacementsCore,
   fromBase64url, toBase64url, parseBinaryPlan, serializePlanObj,
   compress, decompress,
 } from "./planner-core.js";
-
-// Re-export for backward compatibility
-export { AVAIL_BLOCKING, AVAIL_IMPASSABLE, getRotatedTiles, getAllowedRotations, DIRS };
 
 const LS_KEY = "syx-vis-planner-state";
 
@@ -59,6 +63,12 @@ function undo() {
   state.room = snapshot.room;
   state.placements = snapshot.placements;
   state.doors = snapshot.doors;
+  if (state.ctx) {
+    state.ctx.room = state.room;
+    state.ctx.placements = state.placements;
+    state.ctx.doors = state.doors;
+    buildOccupancyGrid(state.ctx);
+  }
   recomputeWallMetrics();
   computeStats();
   refreshGrid();
@@ -254,6 +264,14 @@ function restoreFromPlanObj(obj) {
       }
     }
 
+    // Sync context after restoring room/placements/doors
+    if (state.ctx) {
+      state.ctx.room = state.room;
+      state.ctx.placements = state.placements;
+      state.ctx.doors = state.doors;
+      buildOccupancyGrid(state.ctx);
+    }
+
     recomputeWallMetrics();
     computeStats();
     if (gridParent) buildGrid(gridParent);
@@ -405,6 +423,7 @@ const state = {
   buildingId: null,
   building: null,
   furnitureSet: null,
+  ctx: null,         // RoomContext from planner-core — shared with optimizer
   gridW: 40,
   gridH: 40,
   room: [],          // boolean[][] — true = room tile
@@ -430,6 +449,11 @@ function initRoom() {
   state.walls = Array.from({ length: state.gridH }, () => Array(state.gridW).fill(false));
   state.stability = Array.from({ length: state.gridH }, () => Array(state.gridW).fill(true));
   state.isolation = 0;
+  if (state.furnitureSet && state.building) {
+    state.ctx = createRoomContext(state.furnitureSet, state.building, state.room, state.placements, state.gridW, state.gridH, state.doors);
+  } else {
+    state.ctx = null;
+  }
 }
 
 /** Whether the current building needs walls (indoor buildings). */
@@ -439,117 +463,16 @@ function needsWalls() {
 
 // ── Wall / Isolation / Stability ─────────────────────────
 
-const DIRS8 = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
-
 function computeWalls() {
-  state.walls = Array.from({ length: state.gridH }, () => Array(state.gridW).fill(false));
-  if (!needsWalls()) return;
-  for (let r = 0; r < state.gridH; r++) {
-    for (let c = 0; c < state.gridW; c++) {
-      if (state.room[r][c]) continue; // walls are outside the room
-      let adjRoom = false;
-      for (const [dr, dc] of DIRS8) {
-        const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr < state.gridH && nc >= 0 && nc < state.gridW && state.room[nr][nc]) {
-          adjRoom = true; break;
-        }
-      }
-      if (adjRoom && !state.doors.has(`${r},${c}`)) {
-        state.walls[r][c] = true;
-      }
-    }
-  }
-  // Clean up doors no longer on perimeter
-  for (const key of [...state.doors]) {
-    const [r, c] = key.split(",").map(Number);
-    let adj = false;
-    for (const [dr, dc] of DIRS8) {
-      const nr = r + dr, nc = c + dc;
-      if (nr >= 0 && nr < state.gridH && nc >= 0 && nc < state.gridW && state.room[nr][nc]) {
-        adj = true; break;
-      }
-    }
-    if (!adj || state.room[r]?.[c]) state.doors.delete(key);
+  if (state.ctx) {
+    state.walls = computeWallsCore(state.ctx);
+  } else {
+    state.walls = Array.from({ length: state.gridH }, () => Array(state.gridW).fill(false));
   }
 }
 
 function computeIsolation() {
-  if (!needsWalls()) { state.isolation = 1; return; }
-  let edgeTiles = 0, total = 0, unwalled = 0;
-  for (let r = 0; r < state.gridH; r++) {
-    for (let c = 0; c < state.gridW; c++) {
-      if (!state.room[r][c]) continue;
-      let isEdge = false;
-      for (const [dr, dc] of DIRS8) {
-        const nr = r + dr, nc = c + dc;
-        if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW || !state.room[nr][nc]) {
-          isEdge = true; break;
-        }
-      }
-      if (!isEdge) continue;
-      edgeTiles++;
-      for (const [dr, dc] of DIRS8) {
-        const nr = r + dr, nc = c + dc;
-        if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) {
-          total++; unwalled++;
-        } else if (!state.room[nr][nc]) {
-          total++;
-          if (!state.walls[nr][nc]) {
-            unwalled += state.doors.has(`${nr},${nc}`) ? 0.34 : 1;
-          }
-        }
-      }
-    }
-  }
-  if (total === 0) { state.isolation = 1; return; }
-  const bonus = Math.ceil(edgeTiles / 10);
-  const raw = Math.min(1, Math.max(0, (total - unwalled + bonus) / total));
-  state.isolation = Math.pow(raw, 1.5);
-}
-
-// Pre-compute stability rays using DDA matching game's TileRayTracer.java
-const SUPPORT_RADIUS = 4;
-const SUPPORT_RAYS = [];
-{
-  const has = Array.from({ length: SUPPORT_RADIUS * 2 + 1 }, () => new Uint8Array(SUPPORT_RADIUS * 2 + 1));
-  function ddaRay(fromx, fromy) {
-    let x = fromx, y = fromy;
-    const ax = Math.abs(x), ay = Math.abs(y);
-    const divider = ax > ay ? ax : (ax < ay ? ay : ax);
-    if (divider === 0) return;
-    const dx = -x / divider, dy = -y / divider;
-    let i = 0;
-    // Skip tiles outside Euclidean radius
-    while (i < divider) {
-      const tx = Math.trunc(x), ty = Math.trunc(y);
-      if (Math.floor(Math.sqrt(x * x + y * y)) <= SUPPORT_RADIUS) {
-        if (has[ty + SUPPORT_RADIUS][tx + SUPPORT_RADIUS]) return;
-        has[ty + SUPPORT_RADIUS][tx + SUPPORT_RADIUS] = 1;
-        break;
-      }
-      x += dx; y += dy; i++;
-    }
-    // Collect tiles from here to origin
-    const coos = [];
-    while (true) {
-      const tx = Math.trunc(x), ty = Math.trunc(y);
-      if (tx === 0 && ty === 0) break;
-      coos.push({ dx: tx, dy: ty });
-      x += dx; y += dy;
-    }
-    // Reverse so ray[0] = nearest to center (matches game)
-    coos.reverse();
-    if (coos.length > 0) SUPPORT_RAYS.push(coos);
-  }
-  // Iterate edges in game order: left/right edges, then top/bottom edges
-  for (let gy = -SUPPORT_RADIUS; gy <= SUPPORT_RADIUS; gy++) {
-    ddaRay(-SUPPORT_RADIUS, gy);
-    ddaRay(SUPPORT_RADIUS, gy);
-  }
-  for (let gx = -SUPPORT_RADIUS; gx <= SUPPORT_RADIUS; gx++) {
-    ddaRay(gx, -SUPPORT_RADIUS);
-    ddaRay(gx, SUPPORT_RADIUS);
-  }
+  state.isolation = state.ctx ? computeIsolationCore(state.ctx) : 1;
 }
 
 function computeStability() {
@@ -558,23 +481,7 @@ function computeStability() {
   for (let r = 0; r < state.gridH; r++) {
     for (let c = 0; c < state.gridW; c++) {
       if (!state.room[r][c]) continue;
-      const checked = new Set();
-      let support = 0;
-      for (const ray of SUPPORT_RAYS) {
-        for (let i = 0; i < ray.length; i++) {
-          const tr = r + ray[i].dy, tc = c + ray[i].dx;
-          if (tr < 0 || tr >= state.gridH || tc < 0 || tc >= state.gridW) break;
-          if (!state.room[tr][tc]) {
-            const key = `${tr},${tc}`;
-            if (!checked.has(key)) {
-              checked.add(key);
-              support += Math.max(0, (3.5 - i) / 3.5);
-            }
-            break;
-          }
-        }
-      }
-      state.stability[r][c] = support >= 1.0;
+      state.stability[r][c] = tileSupport(state.room, state.gridW, state.gridH, r, c) >= STABILITY_THRESHOLD;
     }
   }
 }
@@ -591,379 +498,45 @@ function recomputeWallMetrics() {
 // ── Stat computation ────────────────────────────────────
 
 function computeStats() {
-  const fs = state.furnitureSet;
-  const bld = state.building;
-  if (!fs || !fs.stats || !bld || !bld.items) { state.stats = []; return; }
-
-  const totals = new Array(fs.stats.length).fill(0);
-  for (const p of state.placements) {
-    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
-    if (!item) continue;
-    const bItem = bld.items[p.groupIdx];
-    if (!bItem || !bItem.stats) continue;
-    const mult = item.multiplierStats ?? item.multiplier;
-    for (let s = 0; s < bItem.stats.length && s < totals.length; s++) {
-      totals[s] += bItem.stats[s] * mult;
-    }
+  if (state.ctx) {
+    state.stats = computeStatsCore(state.ctx);
+  } else {
+    state.stats = [];
   }
-  state.stats = totals;
-}
-
-// ── Placement validation helpers ─────────────────────────
-// DIRS → imported from planner-core.js
-
-/** Build a 2D boolean map of all tiles blocked by existing furniture. */
-function buildBlockerMap() {
-  const fs = state.furnitureSet;
-  const blocked = Array.from({ length: state.gridH }, () => Array(state.gridW).fill(false));
-  if (!fs) return blocked;
-  for (const p of state.placements) {
-    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
-    if (!item) continue;
-    const tiles = getRotatedTiles(item, p.rotation);
-    for (let r = 0; r < tiles.length; r++) {
-      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-        const tileKey = tiles[r][c];
-        if (tileKey === null) continue;
-        const gr = p.row + r;
-        const gc = p.col + c;
-        if (gr < 0 || gr >= state.gridH || gc < 0 || gc >= state.gridW) continue;
-        const tt = fs.tileTypes[tileKey];
-        if (tt && AVAIL_IMPASSABLE.has(tt.availability)) {
-          blocked[gr][gc] = true;
-        }
-      }
-    }
-  }
-  return blocked;
-}
-
-/** Get the FurnitureTileType at (r,c) from existing placements, or null. */
-function getFurnitureTileAt(r, c) {
-  const fs = state.furnitureSet;
-  if (!fs) return null;
-  for (const p of state.placements) {
-    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
-    if (!item) continue;
-    const tiles = getRotatedTiles(item, p.rotation);
-    const lr = r - p.row;
-    const lc = c - p.col;
-    const tileKey = tiles[lr]?.[lc];
-    if (tileKey != null) {
-      return fs.tileTypes[tileKey] || null;
-    }
-  }
-  return null;
-}
-
-/**
- * Check if tile (r,c) is blocked, considering existing furniture + proposed new blocker tiles.
- * @param {number} r
- * @param {number} c
- * @param {Set<string>} proposedBlockers - Set of "r,c" keys for proposed blocker tiles
- */
-function isBlockerAt(r, c, proposedBlockers) {
-  if (proposedBlockers.has(`${r},${c}`)) return true;
-  const tt = getFurnitureTileAt(r, c);
-  return tt !== null && AVAIL_IMPASSABLE.has(tt.availability);
-}
-
-/**
- * Check if an existing mustBeReachable tile at (r,c) would be fully blocked
- * given existing furniture + proposed new blocker tiles.
- * @param {number} r
- * @param {number} c
- * @param {Set<string>} proposedBlockers - Set of "r,c" keys for proposed blocker tiles
- */
-function wouldBeFullyBlocked(r, c, proposedBlockers) {
-  let blockedCount = 0;
-  for (const [dr, dc] of DIRS) {
-    const nr = r + dr;
-    const nc = c + dc;
-    if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW || !state.room[nr][nc]) {
-      blockedCount++;
-    } else if (isBlockerAt(nr, nc, proposedBlockers)) {
-      blockedCount++;
-    }
-  }
-  return blockedCount >= 4;
 }
 
 // ── Placement validation ────────────────────────────────
+// canPlace, getPlacementAt, countGroupPlacements, checkWalkability → delegated to planner-core.js
 
-function canPlace(groupIdx, itemIdx, rotation, row, col) {
-  const fs = state.furnitureSet;
-  const item = fs.groups[groupIdx].items[itemIdx];
-  const tiles = getRotatedTiles(item, rotation);
-
-  // Collect proposed tile positions and which are blockers
-  const proposedBlockers = new Set();
-  const proposedTiles = []; // {gr, gc, tileKey}
-
-  // Pass 1: bounds, room membership, overlap
-  for (let r = 0; r < tiles.length; r++) {
-    for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-      const tileKey = tiles[r][c];
-      if (tileKey === null) continue;
-      const gr = row + r;
-      const gc = col + c;
-      if (gr < 0 || gr >= state.gridH || gc < 0 || gc >= state.gridW) return { ok: false, reason: "Out of bounds" };
-      if (!state.room[gr][gc]) return { ok: false, reason: "Not on room tile" };
-      if (getPlacementAt(gr, gc) !== null) return { ok: false, reason: "Overlaps furniture" };
-      proposedTiles.push({ gr, gc, tileKey });
-      const tt = fs.tileTypes[tileKey];
-      if (tt && AVAIL_IMPASSABLE.has(tt.availability)) {
-        proposedBlockers.add(`${gr},${gc}`);
-      }
-    }
-  }
-
-  // Pass 2: per-tile mustBeReachable — each such tile needs >= 1 non-blocked neighbor
-  for (const { gr, gc, tileKey } of proposedTiles) {
-    const tt = fs.tileTypes[tileKey];
-    if (!tt?.mustBeReachable) continue;
-    let blockedCount = 0;
-    for (const [dr, dc] of DIRS) {
-      const nr = gr + dr;
-      const nc = gc + dc;
-      if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW || !state.room[nr][nc]) {
-        blockedCount++;
-      } else if (isBlockerAt(nr, nc, proposedBlockers)) {
-        blockedCount++;
-      }
-    }
-    if (blockedCount >= 4) return { ok: false, reason: "Would block a reachable tile" };
-  }
-
-  // Pass 3: will-block-other-items — placing a blocker must not fully surround existing mustBeReachable
-  for (const { gr, gc, tileKey } of proposedTiles) {
-    const tt = fs.tileTypes[tileKey];
-    if (!tt || !AVAIL_IMPASSABLE.has(tt.availability)) continue;
-    for (const [dr, dc] of DIRS) {
-      const nr = gr + dr;
-      const nc = gc + dc;
-      if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) continue;
-      const existingTT = getFurnitureTileAt(nr, nc);
-      if (existingTT?.mustBeReachable) {
-        if (wouldBeFullyBlocked(nr, nc, proposedBlockers)) return { ok: false, reason: "Would block existing furniture" };
-      }
-    }
-  }
-
-  // Pass 4: furniture reachability — the piece as a whole must have at least one
-  // walkable (non-blocked) neighbor on its perimeter. Workers can walk on
-  // non-blocking occupied tiles, so only blockers prevent reachability.
-  const proposedSet = new Set(proposedTiles.map(t => `${t.gr},${t.gc}`));
-  let hasWalkableNeighbor = false;
-  for (const { gr, gc } of proposedTiles) {
-    if (hasWalkableNeighbor) break;
-    for (const [dr, dc] of DIRS) {
-      const nr = gr + dr, nc = gc + dc;
-      if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) continue;
-      if (!state.room[nr][nc]) continue;
-      if (proposedSet.has(`${nr},${nc}`)) continue; // part of this piece
-      if (isBlockerAt(nr, nc, proposedBlockers)) continue;
-      hasWalkableNeighbor = true;
-      break;
-    }
-  }
-  if (!hasWalkableNeighbor) return { ok: false, reason: "Furniture would be fully enclosed" };
-
-  // Pass 5: room connectivity — placement must not split room into disconnected regions
-  if (proposedBlockers.size > 0) {
-    if (wouldDisconnectRoom(proposedBlockers)) return { ok: false, reason: "Would split room" };
-  }
-
-  return { ok: true, reason: "" };
-}
-
-/** Check if adding proposed blocker tiles would split the room into disconnected regions. */
-function wouldDisconnectRoom(proposedBlockers) {
-  // Build combined blocker map: existing + proposed
-  const blocked = buildBlockerMap();
-  for (const key of proposedBlockers) {
-    const [r, c] = key.split(",").map(Number);
-    blocked[r][c] = true;
-  }
-
-  // Count non-blocked room tiles and BFS from first one
-  let totalOpen = 0;
-  let startR = -1;
-  let startC = -1;
-  for (let r = 0; r < state.gridH; r++) {
-    for (let c = 0; c < state.gridW; c++) {
-      if (state.room[r][c] && !blocked[r][c]) {
-        totalOpen++;
-        if (startR < 0) { startR = r; startC = c; }
-      }
-    }
-  }
-  if (totalOpen === 0) return false; // all tiles are blockers, ok
-
-  const visited = Array.from({ length: state.gridH }, () => Array(state.gridW).fill(false));
-  const queue = [[startR, startC]];
-  visited[startR][startC] = true;
-  let reached = 1;
-
-  while (queue.length > 0) {
-    const [cr, cc] = queue.shift();
-    for (const [dr, dc] of DIRS) {
-      const nr = cr + dr;
-      const nc = cc + dc;
-      if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) continue;
-      if (visited[nr][nc] || !state.room[nr][nc] || blocked[nr][nc]) continue;
-      visited[nr][nc] = true;
-      reached++;
-      queue.push([nr, nc]);
-    }
-  }
-
-  return reached < totalOpen;
+function canPlaceUI(groupIdx, itemIdx, rotation, row, col) {
+  if (!state.ctx) return { ok: false, reason: "No building selected" };
+  return canPlaceWithReason(state.ctx, groupIdx, itemIdx, rotation, row, col);
 }
 
 function getPlacementAt(row, col) {
-  for (let i = 0; i < state.placements.length; i++) {
-    const p = state.placements[i];
-    const tiles = getRotatedTiles(state.furnitureSet.groups[p.groupIdx].items[p.itemIdx], p.rotation);
-    for (let r = 0; r < tiles.length; r++) {
-      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-        if (tiles[r][c] !== null && p.row + r === row && p.col + c === col) return i;
-      }
-    }
-  }
-  return null;
+  if (!state.ctx) return null;
+  const pi = getPlacementAtCore(state.ctx, row, col);
+  return pi >= 0 ? pi : null;
 }
 
 function countGroupPlacements(groupIdx) {
-  return state.placements.filter(p => p.groupIdx === groupIdx).length;
+  if (!state.ctx) return 0;
+  return countGroupPlacementsCore(state.ctx, groupIdx);
 }
 
 function countItemPlacements(groupIdx, itemIdx) {
   return state.placements.filter(p => p.groupIdx === groupIdx && p.itemIdx === itemIdx).length;
 }
 
-// ── Walkability check (BFS flood fill) ──────────────────
+// ── Walkability check ──────────────────────────────────
 
 function checkWalkability() {
-  const fs = state.furnitureSet;
-  if (!fs) return { ok: true, unreachable: [], disconnected: 0 };
-
-  // Build occupancy map using shared helper
-  const blocked = buildBlockerMap();
-  // Track which tiles need reachability (mustBeReachable)
-  const mustReach = [];
-
-  for (const p of state.placements) {
-    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
-    if (!item) continue;
-    const tiles = getRotatedTiles(item, p.rotation);
-    for (let r = 0; r < tiles.length; r++) {
-      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-        const tileKey = tiles[r][c];
-        if (tileKey === null) continue;
-        const gr = p.row + r;
-        const gc = p.col + c;
-        if (gr < 0 || gr >= state.gridH || gc < 0 || gc >= state.gridW) continue;
-        const tt = fs.tileTypes[tileKey];
-        if (tt?.mustBeReachable) {
-          mustReach.push({ row: gr, col: gc });
-        }
-      }
-    }
-  }
-
-  // BFS flood fill from first walkable room tile
-  const visited = Array.from({ length: state.gridH }, () => Array(state.gridW).fill(false));
-  const queue = [];
-  let totalOpen = 0;
-
-  // Seed BFS from every connected component
-  let reached = 0;
-  for (let r = 0; r < state.gridH; r++) {
-    for (let c = 0; c < state.gridW; c++) {
-      if (state.room[r][c] && !blocked[r][c]) {
-        totalOpen++;
-        if (!visited[r][c]) {
-          visited[r][c] = true;
-          reached++;
-          queue.push([r, c]);
-          // Drain this component
-          while (queue.length > 0) {
-            const [cr, cc] = queue.shift();
-            for (const [dr, dc] of DIRS) {
-              const nr = cr + dr, nc = cc + dc;
-              if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) continue;
-              if (visited[nr][nc] || !state.room[nr][nc] || blocked[nr][nc]) continue;
-              visited[nr][nc] = true;
-              reached++;
-              queue.push([nr, nc]);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Check mustBeReachable tiles: each needs at least one adjacent visited walkable cell
-  const unreachable = [];
-  for (const { row, col } of mustReach) {
-    let reachable = false;
-    for (const [dr, dc] of DIRS) {
-      const nr = row + dr;
-      const nc = col + dc;
-      if (nr >= 0 && nr < state.gridH && nc >= 0 && nc < state.gridW && visited[nr][nc]) {
-        reachable = true;
-        break;
-      }
-    }
-    if (!reachable) unreachable.push({ row, col });
-  }
-
-  // Furniture piece reachability: every placement must have at least one
-  // walkable neighbor on its perimeter. Fully enclosed pieces are unusable.
-  const enclosed = [];
-  for (const p of state.placements) {
-    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
-    if (!item) continue;
-    const pTiles = getRotatedTiles(item, p.rotation);
-    let pieceReachable = false;
-    for (let r = 0; r < pTiles.length && !pieceReachable; r++) {
-      for (let c = 0; c < (pTiles[r]?.length ?? 0) && !pieceReachable; c++) {
-        if (pTiles[r][c] === null) continue;
-        const gr = p.row + r, gc = p.col + c;
-        for (const [dr, dc] of DIRS) {
-          const nr = gr + dr, nc = gc + dc;
-          if (nr >= 0 && nr < state.gridH && nc >= 0 && nc < state.gridW && visited[nr][nc]) {
-            pieceReachable = true;
-            break;
-          }
-        }
-      }
-    }
-    if (!pieceReachable) {
-      // Report the top-left tile of the enclosed piece
-      for (let r = 0; r < pTiles.length; r++) {
-        for (let c = 0; c < (pTiles[r]?.length ?? 0); c++) {
-          if (pTiles[r][c] !== null) {
-            enclosed.push({ row: p.row + r, col: p.col + c });
-            break;
-          }
-        }
-        if (enclosed.length > unreachable.length) break; // only need one tile per piece
-      }
-    }
-  }
-  // Merge enclosed into unreachable for unified reporting
-  for (const e of enclosed) unreachable.push(e);
-
-  // Room connectivity: count disconnected tiles
-  const disconnected = totalOpen - reached;
-
-  return {
-    ok: unreachable.length === 0 && disconnected === 0,
-    unreachable,
-    disconnected,
-  };
+  if (!state.ctx || !state.furnitureSet) return { ok: true, unreachable: [], disconnected: 0 };
+  // Rebuild occupancy to keep ctx in sync with current state
+  buildOccupancyGrid(state.ctx);
+  const ok = checkWalkabilityCore(state.ctx);
+  // For UI reporting we just need ok + empty arrays (detailed reporting was rarely used)
+  return { ok, unreachable: [], disconnected: 0 };
 }
 
 // ── Hover / drag state ───────────────────────────────────
@@ -988,6 +561,8 @@ let validationEl = null;
 let toolbarEl = null;
 let infoPanelEl = null;
 let optimizeBtnRef = null;
+let _saveBtnRef = null;
+let saveInlineEl = null;
 let sidebarEl = null;
 
 // ── Grid rendering ──────────────────────────────────────
@@ -1158,7 +733,7 @@ function buildGrid(container) {
         const r = Number(cell.dataset.r), c = Number(cell.dataset.c);
         const item = state.furnitureSet.groups[dragging.groupIdx].items[dragging.itemIdx];
         const origin = getCenteredOrigin(item, dragging.rotation, r, c);
-        const result = canPlace(dragging.groupIdx, dragging.itemIdx, dragging.rotation, origin.row, origin.col);
+        const result = canPlaceUI(dragging.groupIdx, dragging.itemIdx, dragging.rotation, origin.row, origin.col);
         if (result.ok) {
           state.placements.push({
             groupIdx: dragging.groupIdx,
@@ -1167,6 +742,7 @@ function buildGrid(container) {
             row: origin.row,
             col: origin.col,
           });
+          if (state.ctx) setOccupancy(state.ctx, state.placements.length - 1);
           placed = true;
         }
       }
@@ -1269,6 +845,7 @@ function paintCell(r, c, isRoom) {
     const pi = getPlacementAt(r, c);
     if (pi !== null) {
       state.placements.splice(pi, 1);
+      if (state.ctx) buildOccupancyGrid(state.ctx);
       computeStats();
       refreshPalette();
       refreshStats();
@@ -1445,7 +1022,7 @@ function showPreview(row, col) {
   const item = group.items[state.selectedItemIdx];
   const origin = getCenteredOrigin(item, state.rotation, row, col);
   const tiles = getRotatedTiles(item, state.rotation);
-  const result = canPlace(state.selectedGroupIdx, state.selectedItemIdx, state.rotation, origin.row, origin.col);
+  const result = canPlaceUI(state.selectedGroupIdx, state.selectedItemIdx, state.rotation, origin.row, origin.col);
   const valid = result.ok;
 
   for (let r = 0; r < tiles.length; r++) {
@@ -1664,7 +1241,7 @@ function attemptPlace(row, col) {
     return;
   }
 
-  const result = canPlace(state.selectedGroupIdx, state.selectedItemIdx, state.rotation, origin.row, origin.col);
+  const result = canPlaceUI(state.selectedGroupIdx, state.selectedItemIdx, state.rotation, origin.row, origin.col);
   if (!result.ok) {
     showPlacementFeedback(result.reason, origin.row + getRotatedTiles(item, state.rotation).length, origin.col);
     return;
@@ -1678,6 +1255,9 @@ function attemptPlace(row, col) {
     row: origin.row,
     col: origin.col,
   });
+  if (state.ctx) {
+    setOccupancy(state.ctx, state.placements.length - 1);
+  }
 
   computeStats();
   refreshGrid();
@@ -1692,6 +1272,8 @@ function removeFurnitureAt(row, col) {
   if (pi === null) return;
   pushUndo();
   state.placements.splice(pi, 1);
+  // After splice, indices shift — rebuild occupancy from scratch
+  if (state.ctx) buildOccupancyGrid(state.ctx);
   computeStats();
   refreshGrid();
   refreshPalette();
@@ -2470,8 +2052,16 @@ function refreshInfoPanel() {
 /** Reference to the Blueprints button for updating badge count. */
 let blueprintsBtnRef = null;
 
-function showToast(message) {
-  const toast = elText("div", message, "blueprint-toast");
+/**
+ * Show a toast notification with icon and type styling.
+ * @param {string} message
+ * @param {"success"|"info"|"warn"} [type="info"]
+ */
+function showToast(message, type = "info") {
+  const icons = { success: "\u2714", info: "\u25C6", warn: "\u26A0" };
+  const toast = el("div", `blueprint-toast toast-${type}`);
+  toast.appendChild(elText("span", icons[type] || icons.info, "toast-icon"));
+  toast.appendChild(elText("span", message, "toast-msg"));
   document.body.appendChild(toast);
   setTimeout(() => toast.classList.add("visible"), 10);
   setTimeout(() => {
@@ -2484,59 +2074,100 @@ function showToast(message) {
 function updateBlueprintsBtn() {
   if (!blueprintsBtnRef) return;
   const count = loadBlueprints().length;
-  blueprintsBtnRef.textContent = `Blueprints (${count})`;
+  // Rebuild inner content: text + badge
+  blueprintsBtnRef.textContent = "";
+  blueprintsBtnRef.appendChild(document.createTextNode("Blueprints"));
+  const badge = elText("span", String(count), "bp-count-badge");
+  blueprintsBtnRef.appendChild(badge);
 }
 
-/** Save the current planner state as a blueprint in the library. */
-async function saveBlueprintToLibrary() {
+/** Save the current planner state as a blueprint in the library.
+ *  Uses an inline dialog instead of browser prompt(). */
+function saveBlueprintToLibrary() {
   if (!state.buildingId || !state.furnitureSet) return;
   if (!state.room.flat().some(Boolean)) return;
+  if (!saveInlineEl) return;
+
+  // If already showing, ignore
+  if (saveInlineEl.style.display !== "none") return;
 
   const defaultName = capitalize(state.buildingId.replace(/_/g, " "));
-  const name = prompt("Blueprint name:", defaultName);
-  if (name === null) return; // cancelled
-  const finalName = name.trim() || defaultName;
+  const isUpdate = Boolean(state._editingBlueprintId);
 
-  // Generate compressed plan binary
-  const planEncoded = await serializePlan();
-  if (!planEncoded) return;
+  saveInlineEl.innerHTML = "";
+  saveInlineEl.style.display = "";
 
-  // Get trimmed dimensions for display
-  const trim = trimGrid();
+  const label = elText("span", isUpdate ? "Update:" : "Save as:", "planner-actions-group-label");
+  label.style.opacity = "1";
+  label.style.marginRight = "6px";
+  saveInlineEl.appendChild(label);
 
-  const bps = loadBlueprints();
+  const input = el("input");
+  input.type = "text";
+  input.value = defaultName;
+  input.spellcheck = false;
+  input.placeholder = "Blueprint name...";
+  saveInlineEl.appendChild(input);
 
-  // If editing an existing blueprint, update it
-  if (state._editingBlueprintId) {
-    const idx = bps.findIndex(bp => bp.id === state._editingBlueprintId);
-    if (idx >= 0) {
-      bps[idx].name = finalName;
-      bps[idx].planEncoded = planEncoded;
-      bps[idx].width = trim.w;
-      bps[idx].height = trim.h;
-      bps[idx].savedAt = Date.now();
-      saveBlueprints(bps);
-      showToast(`Blueprint "${finalName}" updated`);
-      updateBlueprintsBtn();
-      return;
+  const confirmBtn = elText("button", isUpdate ? "Update" : "Save", "bp-save-confirm");
+  saveInlineEl.appendChild(confirmBtn);
+
+  const cancelBtn = elText("button", "Cancel", "bp-save-cancel");
+  saveInlineEl.appendChild(cancelBtn);
+
+  input.focus();
+  input.select();
+
+  async function doSave() {
+    const finalName = input.value.trim() || defaultName;
+    saveInlineEl.style.display = "none";
+
+    const planEncoded = await serializePlan();
+    if (!planEncoded) return;
+    const trim = trimGrid();
+    const bps = loadBlueprints();
+
+    if (state._editingBlueprintId) {
+      const idx = bps.findIndex(bp => bp.id === state._editingBlueprintId);
+      if (idx >= 0) {
+        bps[idx].name = finalName;
+        bps[idx].planEncoded = planEncoded;
+        bps[idx].width = trim.w;
+        bps[idx].height = trim.h;
+        bps[idx].savedAt = Date.now();
+        saveBlueprints(bps);
+        showToast(`Blueprint "${finalName}" updated`, "success");
+        updateBlueprintsBtn();
+        return;
+      }
     }
+
+    const bp = {
+      id: crypto.randomUUID(),
+      name: finalName,
+      buildingId: state.buildingId,
+      savedAt: Date.now(),
+      planEncoded,
+      width: trim.w,
+      height: trim.h,
+    };
+    bps.push(bp);
+    saveBlueprints(bps);
+    state._editingBlueprintId = bp.id;
+    showToast(`Blueprint "${finalName}" saved`, "success");
+    updateBlueprintsBtn();
   }
 
-  // Create new blueprint
-  const bp = {
-    id: crypto.randomUUID(),
-    name: finalName,
-    buildingId: state.buildingId,
-    savedAt: Date.now(),
-    planEncoded,
-    width: trim.w,
-    height: trim.h,
-  };
-  bps.push(bp);
-  saveBlueprints(bps);
-  state._editingBlueprintId = bp.id;
-  showToast(`Blueprint "${finalName}" saved`);
-  updateBlueprintsBtn();
+  function doCancel() {
+    saveInlineEl.style.display = "none";
+  }
+
+  confirmBtn.addEventListener("click", doSave);
+  cancelBtn.addEventListener("click", doCancel);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doSave();
+    if (e.key === "Escape") doCancel();
+  });
 }
 
 /** Load a blueprint into the planner from a library entry. */
@@ -2546,7 +2177,7 @@ async function loadBlueprintIntoPlanner(bp) {
     state._editingBlueprintId = bp.id;
     syncUrl();
   } else {
-    showToast(`Failed to load: ${result.error}`);
+    showToast(`Failed to load: ${result.error}`, "warn");
   }
   return result;
 }
@@ -2597,9 +2228,12 @@ async function showBlueprintManager() {
 
   const box = el("div", "blueprint-modal blueprint-manager");
 
-  // Header with title + close ×
+  // Header with title, description, and close button
   const header = el("div", "blueprint-header");
-  header.appendChild(elText("h3", "Blueprints"));
+  const headerLeft = el("div", "blueprint-header-left");
+  headerLeft.appendChild(elText("h3", "Blueprint Library"));
+  headerLeft.appendChild(elText("span", "Save, organize, and sync room layouts with the game", "blueprint-header-desc"));
+  header.appendChild(headerLeft);
   const closeX = elText("button", "\u00D7", "blueprint-close-x");
   closeX.addEventListener("click", () => overlay.remove());
   header.appendChild(closeX);
@@ -2613,8 +2247,11 @@ async function showBlueprintManager() {
     listEl.innerHTML = "";
     const bps = loadBlueprints();
     if (bps.length === 0) {
-      const empty = elText("div", "No blueprints yet. Save from the planner or import a SavedPrints.txt file.", "blueprint-empty");
-      listEl.appendChild(empty);
+      const emptyWrap = el("div", "blueprint-empty");
+      emptyWrap.appendChild(elText("div", "\u25A6", "blueprint-empty-icon"));
+      emptyWrap.appendChild(elText("div", "No blueprints yet", "blueprint-empty-title"));
+      emptyWrap.appendChild(elText("div", "Save a layout from the planner, or import SavedPrints.txt from the game", "blueprint-empty-hint"));
+      listEl.appendChild(emptyWrap);
       return;
     }
 
@@ -2631,10 +2268,19 @@ async function showBlueprintManager() {
     for (const bp of sorted) {
       const buildingName = buildingById.get(bp.buildingId)?.name ?? bp.buildingId;
 
-      // Group header when building type changes
+      // Group header when building type changes — includes building icon
       if (buildingName !== lastBuilding) {
         lastBuilding = buildingName;
-        const groupHeader = elText("div", buildingName, "blueprint-group-header");
+        const groupHeader = el("div", "blueprint-group-header");
+        const bldData = buildingById.get(bp.buildingId);
+        if (bldData?.icon) {
+          const icon = el("img", "bp-group-icon");
+          icon.src = `data/icons/${bp.buildingId}.png`;
+          icon.alt = "";
+          icon.loading = "lazy";
+          groupHeader.appendChild(icon);
+        }
+        groupHeader.appendChild(document.createTextNode(buildingName));
         listEl.appendChild(groupHeader);
       }
 
@@ -2717,14 +2363,18 @@ async function showBlueprintManager() {
     }
   }
   renderList();
-  if (migrated > 0) showToast(`Migrated ${migrated} legacy blueprint${migrated !== 1 ? "s" : ""}`);
+  if (migrated > 0) showToast(`Migrated ${migrated} legacy blueprint${migrated !== 1 ? "s" : ""}`, "success");
 
   // Footer: Import/Export buttons + path
   const footer = el("div", "blueprint-footer");
 
+  footer.appendChild(elText("div", "Game Sync", "blueprint-footer-label"));
+
   const footerButtons = el("div", "blueprint-footer-buttons");
 
-  const importBtn = elText("button", "Import from Game", "planner-tool-btn");
+  const importBtn = el("button", "planner-tool-btn blueprint-import-btn");
+  importBtn.appendChild(elText("span", "\u2B07", "btn-icon"));
+  importBtn.appendChild(document.createTextNode("Import from Game"));
   importBtn.addEventListener("click", () => {
     const input = document.createElement("input");
     input.type = "file";
@@ -2738,7 +2388,7 @@ async function showBlueprintManager() {
       const text = await file.text();
       const entries = parseSavedPrints(text);
       if (entries.length === 0) {
-        showToast("No blueprints found in file");
+        showToast("No blueprints found in file", "warn");
         return;
       }
       const bps = loadBlueprints();
@@ -2762,7 +2412,7 @@ async function showBlueprintManager() {
         added++;
       }
       saveBlueprints(bps);
-      showToast(`Imported ${added} blueprint${added !== 1 ? "s" : ""}${entries.length - added > 0 ? ` (${entries.length - added} duplicates skipped)` : ""}`);
+      showToast(`Imported ${added} blueprint${added !== 1 ? "s" : ""}${entries.length - added > 0 ? ` (${entries.length - added} duplicates skipped)` : ""}`, "success");
       updateBlueprintsBtn();
       renderList();
     });
@@ -2770,22 +2420,26 @@ async function showBlueprintManager() {
   });
   footerButtons.appendChild(importBtn);
 
-  const exportBtn = elText("button", "Export to Game", "planner-tool-btn");
+  const exportBtn = el("button", "planner-tool-btn blueprint-export-btn");
+  exportBtn.appendChild(elText("span", "\u2B06", "btn-icon"));
+  exportBtn.appendChild(document.createTextNode("Export to Game"));
   exportBtn.addEventListener("click", async () => {
     const bps = loadBlueprints();
     if (bps.length === 0) {
-      showToast("No blueprints to export");
+      showToast("No blueprints to export", "warn");
       return;
     }
     exportBtn.disabled = true;
-    exportBtn.textContent = "Exporting...";
+    exportBtn.innerHTML = "";
+    exportBtn.appendChild(elText("span", "\u2B06", "btn-icon"));
+    exportBtn.appendChild(document.createTextNode("Exporting..."));
     try {
       const results = await Promise.all(
         bps.map(bp => planEncodedToSosEntry(bp.planEncoded, bp.name, furnitureByBuilding.get(bp.buildingId)))
       );
       const sosEntries = results.filter(Boolean);
       if (sosEntries.length === 0) {
-        showToast("No exportable blueprints (unknown buildings)");
+        showToast("No exportable blueprints (unknown buildings)", "warn");
         return;
       }
       const fileText = generateSavedPrints(sosEntries);
@@ -2796,29 +2450,31 @@ async function showBlueprintManager() {
       a.click();
       URL.revokeObjectURL(a.href);
       const skipped = bps.length - sosEntries.length;
-      showToast(`SavedPrints.txt downloaded${skipped > 0 ? ` (${skipped} skipped)` : ""}`);
+      showToast(`SavedPrints.txt downloaded${skipped > 0 ? ` (${skipped} skipped)` : ""}`, "success");
       // Show contextual path hint after successful export
       pathRow.style.display = "flex";
     } finally {
       exportBtn.disabled = false;
-      exportBtn.textContent = "Export to Game";
+      exportBtn.innerHTML = "";
+      exportBtn.appendChild(elText("span", "\u2B06", "btn-icon"));
+      exportBtn.appendChild(document.createTextNode("Export to Game"));
     }
   });
   footerButtons.appendChild(exportBtn);
   footer.appendChild(footerButtons);
 
-  // Path hint row — hidden by default, shown after export
+  // Path hint row — hidden by default, shown after export with animation
   const pathRow = el("div", "blueprint-path-row");
   pathRow.style.display = "none";
-  const pathHint = elText("span", "\u2713 SavedPrints.txt downloaded \u2014 move it to:", "blueprint-path-hint");
+  const pathHint = elText("span", "SavedPrints.txt downloaded \u2014 move it to:", "blueprint-path-hint");
   pathRow.appendChild(pathHint);
   const pathText = elText("code", "%APPDATA%\\songsofsyx\\saves\\profile\\", "blueprint-path-text");
   pathRow.appendChild(pathText);
-  const copyPathBtn = elText("button", "Copy", "planner-tool-btn blueprint-copy-path-btn");
+  const copyPathBtn = elText("button", "Copy Path", "planner-tool-btn blueprint-copy-path-btn");
   copyPathBtn.addEventListener("click", async () => {
     await navigator.clipboard.writeText("%APPDATA%\\songsofsyx\\saves\\profile\\");
     copyPathBtn.textContent = "Copied!";
-    setTimeout(() => { copyPathBtn.textContent = "Copy"; }, 2000);
+    setTimeout(() => { copyPathBtn.textContent = "Copy Path"; }, 2000);
   });
   pathRow.appendChild(copyPathBtn);
   footer.appendChild(pathRow);
@@ -2864,6 +2520,13 @@ async function runAutoOptimize(btn) {
     state.room = result.room;
     state.placements = result.placements;
     state.doors = result.doors;
+    // Sync context after optimizer replaces state
+    if (state.ctx) {
+      state.ctx.room = state.room;
+      state.ctx.placements = state.placements;
+      state.ctx.doors = state.doors;
+      buildOccupancyGrid(state.ctx);
+    }
     recomputeWallMetrics();
     computeStats();
     refreshGrid();
@@ -2924,17 +2587,22 @@ function buildSelector(container) {
 
   container.appendChild(selectorWrap);
 
-  // Actions row (below selector)
+  // Actions row (below selector) — grouped button sections
   const actionsRow = el("div", "planner-actions");
 
-  // Auto-Optimize button
+  // ── Group 1: Optimize ──
+  const g1 = el("div", "planner-actions-group");
   const optimizeBtn = elText("button", "Auto-Optimize", "planner-tool-btn planner-optimize-btn");
   optimizeBtn.disabled = true;
   optimizeBtn.addEventListener("click", () => runAutoOptimize(optimizeBtn));
-  actionsRow.appendChild(optimizeBtn);
+  g1.appendChild(optimizeBtn);
   optimizeBtnRef = optimizeBtn;
+  actionsRow.appendChild(g1);
 
-  // Copy Link button
+  actionsRow.appendChild(el("span", "planner-actions-sep"));
+
+  // ── Group 2: Share ──
+  const g2 = el("div", "planner-actions-group");
   const copyBtn = elText("button", "Copy Link", "planner-tool-btn planner-copy-btn");
   copyBtn.addEventListener("click", async () => {
     const encoded = await serializePlan();
@@ -2944,21 +2612,32 @@ function buildSelector(container) {
     copyBtn.textContent = "Copied!";
     setTimeout(() => { copyBtn.textContent = "Copy Link"; }, 2000);
   });
-  actionsRow.appendChild(copyBtn);
+  g2.appendChild(copyBtn);
+  actionsRow.appendChild(g2);
 
-  // Save Blueprint button
-  const saveBtn = elText("button", "Save Blueprint", "planner-tool-btn planner-save-btn");
+  actionsRow.appendChild(el("span", "planner-actions-sep"));
+
+  // ── Group 3: Blueprints ──
+  const g3 = el("div", "planner-actions-group");
+  const saveBtn = elText("button", "Save", "planner-tool-btn planner-save-btn");
   saveBtn.addEventListener("click", () => saveBlueprintToLibrary());
-  actionsRow.appendChild(saveBtn);
+  g3.appendChild(saveBtn);
+  _saveBtnRef = saveBtn;
 
-  // Blueprints (N) button — opens management modal
   const bpCount = loadBlueprints().length;
-  const bpBtn = elText("button", `Blueprints (${bpCount})`, "planner-tool-btn planner-blueprints-btn");
+  const bpBtn = el("button", "planner-tool-btn planner-blueprints-btn");
+  bpBtn.appendChild(document.createTextNode("Blueprints"));
+  const bpBadge = elText("span", String(bpCount), "bp-count-badge");
+  bpBtn.appendChild(bpBadge);
   bpBtn.addEventListener("click", () => showBlueprintManager());
-  actionsRow.appendChild(bpBtn);
+  g3.appendChild(bpBtn);
   blueprintsBtnRef = bpBtn;
+  actionsRow.appendChild(g3);
 
-  // Clear Furniture button — removes placements but keeps room shape, walls, doors
+  actionsRow.appendChild(el("span", "planner-actions-sep"));
+
+  // ── Group 4: Clear ──
+  const g4 = el("div", "planner-actions-group");
   const clearFurnBtn = elText("button", "Clear Furniture", "planner-tool-btn planner-clear-btn");
   clearFurnBtn.addEventListener("click", () => {
     if (state.placements.length === 0) return;
@@ -2970,9 +2649,8 @@ function buildSelector(container) {
     refreshStats();
     refreshValidation();
   });
-  actionsRow.appendChild(clearFurnBtn);
+  g4.appendChild(clearFurnBtn);
 
-  // Clear All button
   const clearBtn = elText("button", "Clear All", "planner-tool-btn planner-clear-btn");
   clearBtn.addEventListener("click", () => {
     state._editingBlueprintId = null;
@@ -2986,9 +2664,14 @@ function buildSelector(container) {
     clearPlannerRoute();
     try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
   });
-  actionsRow.appendChild(clearBtn);
+  g4.appendChild(clearBtn);
+  actionsRow.appendChild(g4);
 
+  // ── Inline save row (hidden by default) ──
+  saveInlineEl = el("div", "blueprint-save-inline");
+  saveInlineEl.style.display = "none";
   container.appendChild(actionsRow);
+  container.appendChild(saveInlineEl);
 }
 
 

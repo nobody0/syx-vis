@@ -7,8 +7,8 @@
 3. **Libraries via CDN only.** D3.js v7 loaded from CDN in `index.html`. Layout is custom (`derive/layout.js`).
 4. **Bipartite graph model.** Both resources AND buildings are nodes. Resources are circles (colored by resource category). Buildings are rounded rectangles (colored by building category). Recipes are edges: input resources → building → output resources.
 5. **Columns = build-cost score** (construction materials × tech costs). Layout bands: materials (top), civilian, services, military (bottom).
-6. **Keep it simple.** No over-engineering. Minimal CSS. Single `index.html` entry point. Serve with `npx serve .` and open in browser.
-7. **ES Modules require HTTP server.** `file://` blocks imports due to CORS. Always use `npx serve .` or `npx http-server .` for local dev.
+6. **Keep it simple.** No over-engineering. Minimal CSS. Single `index.html` entry point. Serve with `npx http-server . -c-1` and open in browser.
+7. **ES Modules require HTTP server.** `file://` blocks imports due to CORS. Always use `npx http-server . -c-1` for local dev.
 
 ## Data Pipeline
 

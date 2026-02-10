@@ -44,10 +44,11 @@ export function renderUpkeep(container) {
 
   // Summary: total annual resource demand per building instance
   html.push(`<h3>Total Annual Maintenance per Instance</h3>`);
+  html.push(`<div class="upkeep-summary-wrap">`);
   html.push(`<table class="calc-table">`);
   html.push(`<thead><tr>
     <th>Building</th>
-    <th>Resources (/yr)</th>
+    <th>Annual Resource Cost</th>
   </tr></thead><tbody>`);
 
   for (const b of degrading) {
@@ -57,11 +58,12 @@ export function renderUpkeep(container) {
     });
     html.push(`<tr>
       <td><span class="resource-name"><img src="data/icons/${b.icon}" alt="">${b.name}</span></td>
-      <td>${costs.join(", ")}</td>
+      <td>${costs.join(`<span class="cost-sep"> + </span>`)}</td>
     </tr>`);
   }
 
   html.push(`</tbody></table>`);
+  html.push(`</div>`);
   html.push(`</div>`);
   container.innerHTML = html.join("\n");
 }

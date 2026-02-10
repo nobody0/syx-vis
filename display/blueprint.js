@@ -1,6 +1,6 @@
 // Blueprint export + management — SOS-format text for Songs of Syx + localStorage library
 import {
-  AVAIL_BLOCKING, getRotatedTiles, getAllowedRotations,
+  AVAIL_IMPASSABLE, getRotatedTiles, getAllowedRotations,
   fromBase64url, toBase64url, parseBinaryPlan, serializePlanObj,
   compress, decompress,
 } from "./planner-core.js";
@@ -428,7 +428,7 @@ export function exportBlueprint(state, name) {
 
       // Solid flag: walls are solid, blocking furniture tiles are solid
       if (isWall) flags |= 8;
-      if (furn && furn.tileType && AVAIL_BLOCKING.has(furn.tileType.availability)) {
+      if (furn && furn.tileType && AVAIL_IMPASSABLE.has(furn.tileType.availability)) {
         flags |= 8;
       }
 
