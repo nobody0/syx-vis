@@ -184,3 +184,43 @@ export function serializePlanObj(plan) {
 
   return buf;
 }
+
+/** Compress bytes using deflate-raw via CompressionStream. */
+export async function compress(data) {
+  const cs = new CompressionStream("deflate-raw");
+  const writer = cs.writable.getWriter();
+  writer.write(data);
+  writer.close();
+  const chunks = [];
+  const reader = cs.readable.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+  const out = new Uint8Array(totalLen);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+/** Decompress deflate-raw bytes via DecompressionStream. */
+export async function decompress(data) {
+  const ds = new DecompressionStream("deflate-raw");
+  const writer = ds.writable.getWriter();
+  writer.write(data);
+  writer.close();
+  const chunks = [];
+  const reader = ds.readable.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+  const out = new Uint8Array(totalLen);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}

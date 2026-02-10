@@ -252,6 +252,7 @@ function takeSnapshot(ctx) {
     placements: ctx.placements.map(p => ({ ...p })),
     room: ctx.room.map(row => [...row]),
     doors: new Set(ctx.doors),
+    reservedTiles: new Set(ctx.reservedTiles),
   };
 }
 
@@ -259,6 +260,7 @@ function restoreSnapshot(ctx, snapshot) {
   ctx.placements = snapshot.placements.map(p => ({ ...p }));
   ctx.room = snapshot.room.map(row => [...row]);
   ctx.doors = new Set(snapshot.doors);
+  ctx.reservedTiles = new Set(snapshot.reservedTiles);
   ctx.occupancy = buildOccupancyGrid(ctx);
   rebuildRoomTiles(ctx);
   ctx._doorCandidateCache = undefined;
@@ -310,6 +312,22 @@ function countGroupPlacements(ctx, groupIdx) {
   return count;
 }
 
+/** Check if a placement would put a blocker on a reserved tile. */
+function overlapsReserved(ctx, groupIdx, itemIdx, rotation, row, col) {
+  if (ctx.reservedTiles.size === 0) return false;
+  const tiles = getCachedTiles(ctx, groupIdx, itemIdx, rotation);
+  const fs = ctx.furnitureSet;
+  for (let r = 0; r < tiles.length; r++)
+    for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
+      const tileKey = tiles[r][c];
+      if (tileKey === null) continue;
+      if (!ctx.reservedTiles.has((row + r) * ctx.gridW + (col + c))) continue;
+      const tt = fs.tileTypes[tileKey];
+      if (tt && AVAIL_BLOCKING.has(tt.availability)) return true;
+    }
+  return false;
+}
+
 // ── Placement validation ─────────────────────────────────
 function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
   const { furnitureSet: fs, gridW, gridH, room, occupancy } = ctx;
@@ -331,6 +349,15 @@ function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
       proposedTiles.push({ gr, gc, tileKey });
       const tt = fs.tileTypes[tileKey];
       if (tt && AVAIL_BLOCKING.has(tt.availability)) proposedBlockers.add(gr * gridW + gc);
+    }
+  }
+
+  // Reject if a blocking tile would cover a reserved tile (door access must stay walkable)
+  if (ctx.reservedTiles.size > 0) {
+    for (const { gr, gc, tileKey } of proposedTiles) {
+      if (!ctx.reservedTiles.has(gr * gridW + gc)) continue;
+      const tt = fs.tileTypes[tileKey];
+      if (tt && AVAIL_BLOCKING.has(tt.availability)) return false;
     }
   }
 
@@ -742,7 +769,7 @@ function preCleanRoom(ctx) {
 }
 
 // ── Pre-place support pillars ────────────────────────────
-async function prePlacePillars(ctx) {
+async function placeRegularPillars(ctx) {
   if (!ctx.furnitureSet.mustBeIndoors) return;
   for (let pass = 0; pass < 20; pass++) {
     const unstable = countUnstableTiles(ctx);
@@ -774,6 +801,108 @@ async function prePlacePillars(ctx) {
     if (!bestCandidate || bestCuredCount <= 0) break;
     removeRoomTile(ctx, bestCandidate.r, bestCandidate.c);
   }
+}
+
+// ── Early door placement ─────────────────────────────────
+
+// Collect all valid door candidates, sorted by geometric score (descending)
+function collectDoorCandidates(ctx) {
+  if (!ctx.furnitureSet.mustBeIndoors) return [];
+  if (ctx.doors.size > 0) return []; // user already placed doors
+  if (ctx.roomTiles.length > 500) return []; // large rooms — doorPhase handles naturally
+
+  const outside = findOutsideTiles(ctx);
+  const { gridW, gridH, room } = ctx;
+
+  let minR = gridH, maxR = 0, minC = gridW, maxC = 0;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c]) {
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+        if (c < minC) minC = c;
+        if (c > maxC) maxC = c;
+      }
+  if (minR > maxR) return [];
+
+  const roomW = maxC - minC + 1, roomH = maxR - minR + 1;
+  const midR = (minR + maxR) / 2, midC = (minC + maxC) / 2;
+
+  const candidates = [];
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++) {
+      if (room[r][c] || !outside[r][c]) continue;
+      let adjRoom = 0;
+      const adjWalkable = [];
+      for (const [dr, dc] of DIRS) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && room[nr][nc]) {
+          adjRoom++;
+          adjWalkable.push({ r: nr, c: nc });
+        }
+      }
+      if (adjRoom === 0) continue;
+
+      let validDoor = false;
+      for (const [dr, dc] of DIRS) {
+        const ar = r + dr, ac = c + dc;
+        const br = r - dr, bc = c - dc;
+        const aIsRoom = ar >= 0 && ar < gridH && ac >= 0 && ac < gridW && room[ar][ac];
+        const bIsRoom = br >= 0 && br < gridH && bc >= 0 && bc < gridW && room[br][bc];
+        const aIsOpen = isOpenTile(ctx, ar, ac);
+        const bIsOpen = isOpenTile(ctx, br, bc);
+        if ((aIsRoom && bIsOpen) || (bIsRoom && aIsOpen)) {
+          const pr1 = r + dc, pc1 = c + dr;
+          const pr2 = r - dc, pc2 = c - dr;
+          const perp1Room = pr1 >= 0 && pr1 < gridH && pc1 >= 0 && pc1 < gridW && room[pr1][pc1];
+          const perp2Room = pr2 >= 0 && pr2 < gridH && pc2 >= 0 && pc2 < gridW && room[pr2][pc2];
+          if (!perp1Room && !perp2Room) { validDoor = true; break; }
+        }
+      }
+      if (!validDoor) continue;
+
+      // Score: prefer middle of longer edge
+      let edgeScore = 0;
+      if (roomW >= roomH) {
+        if (r <= minR || r >= maxR) edgeScore += 2;
+        edgeScore += 1 - Math.abs(c - midC) / Math.max(1, roomW / 2);
+      } else {
+        if (c <= minC || c >= maxC) edgeScore += 2;
+        edgeScore += 1 - Math.abs(r - midR) / Math.max(1, roomH / 2);
+      }
+
+      // Sort adjWalkable: closest to room center first
+      adjWalkable.sort((a, b) =>
+        (Math.abs(a.r - midR) + Math.abs(a.c - midC)) - (Math.abs(b.r - midR) + Math.abs(b.c - midC))
+      );
+
+      candidates.push({ r, c, score: edgeScore, adjWalkable });
+    }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
+}
+
+// Apply a door candidate: set door (no reservation — doorPhase's relaxed fallback
+// ensures doors are always found even when all perimeter tiles get blocked)
+function applyDoorCandidate(ctx, cand) {
+  ctx.doors.add(`${cand.r},${cand.c}`);
+}
+
+// Select spatially diverse candidates (at least minDist manhattan distance apart)
+function selectDiverseCandidates(candidates, maxCount, minDist) {
+  const selected = [];
+  for (const c of candidates) {
+    if (selected.length >= maxCount) break;
+    let tooClose = false;
+    for (const s of selected) {
+      if (Math.abs(c.r - s.r) + Math.abs(c.c - s.c) < minDist) {
+        tooClose = true; break;
+      }
+    }
+    if (!tooClose) selected.push(c);
+  }
+  return selected;
 }
 
 // ── Create support pillars (post-placement) ──────────────
@@ -1645,6 +1774,7 @@ async function localSearchPhase(ctx) {
             else if (ctx.occupancy[gr][gc] >= 0) fits = false;
           }
 
+        if (fits && overlapsReserved(ctx, p.groupIdx, newII, p.rotation, p.row, p.col)) fits = false;
         if (fits) {
           setOccupancy(ctx, pi);
           let accept = checkWalkabilityOpt(ctx) && scoreLayout(ctx) > currentScore && hasAnyDoorCandidate(ctx);
@@ -1702,6 +1832,7 @@ async function localSearchPhase(ctx) {
             if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
             else if (ctx.occupancy[gr][gc] >= 0) fits = false;
           }
+        if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
 
         if (fits) {
           setOccupancy(ctx, pi);
@@ -1754,6 +1885,7 @@ async function localSearchPhase(ctx) {
               else if (ctx.occupancy[gr][gc] >= 0) fits = false;
             }
 
+          if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, rot, p.row, p.col)) fits = false;
           if (fits) {
             setOccupancy(ctx, pi);
             const postStats = getStats(ctx);
@@ -2068,6 +2200,7 @@ async function localSearchPhase(ctx) {
               if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
               else if (ctx.occupancy[gr][gc] >= 0) fits = false;
             }
+          if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
           if (fits) { setOccupancy(ctx, pi); moved = true; }
           else { p.row = origR; p.col = origC; setOccupancy(ctx, pi); }
         }
@@ -2098,6 +2231,7 @@ async function localSearchPhase(ctx) {
                   if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
                   else if (ctx.occupancy[gr][gc] >= 0) fits = false;
                 }
+              if (fits && overlapsReserved(ctx, p.groupIdx, newII, p.rotation, p.row, p.col)) fits = false;
               if (fits) { setOccupancy(ctx, pi); moved = true; found = true; break; }
               p.row = oR; p.col = oC;
             }
@@ -2194,6 +2328,7 @@ async function trimPhase(ctx) {
 function canEraseTile(ctx, r, c) {
   if (!ctx.room[r][c]) return false;
   if (ctx.occupancy[r][c] >= 0) return false;
+  if (ctx.reservedTiles.has(r * ctx.gridW + c)) return false;
   if (ctx.roomTiles.length <= 1) return false;
   ctx.room[r][c] = false;
   const connected = checkRoomConnectivity(ctx);
@@ -2207,6 +2342,8 @@ function doorPhase(ctx) {
   ctx.doors = new Set();
   const outside = findOutsideTiles(ctx);
 
+  // Collect door candidates: valid geometry + at least one adjacent room tile
+  const allGeomValid = [];
   const candidates = [];
   for (let r = 0; r < ctx.gridH; r++)
     for (let c = 0; c < ctx.gridW; c++) {
@@ -2236,6 +2373,8 @@ function doorPhase(ctx) {
       }
       if (!validDoor) continue;
 
+      allGeomValid.push({ r, c });
+
       let hasWalkable = false;
       for (const [dr, dc] of DIRS) {
         const nr = r + dr, nc = c + dc;
@@ -2248,6 +2387,31 @@ function doorPhase(ctx) {
 
       candidates.push({ r, c });
     }
+
+  // If strict hasWalkable filter yielded 0 candidates, fall back to geometry-only
+  // candidates — but ensure at least one adjacent tile is made walkable
+  if (candidates.length === 0 && allGeomValid.length > 0) {
+    // Sort by blocker cost: prefer candidates where the cheapest adjacent blocker
+    // has the lowest multiplier (least score loss to remove)
+    for (const cand of allGeomValid) {
+      let minCost = Infinity;
+      for (const [dr, dc] of DIRS) {
+        const nr = cand.r + dr, nc = cand.c + dc;
+        if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) continue;
+        if (ctx.blockerCount[nr][nc] === 0) { minCost = 0; break; } // already walkable
+        const pi = ctx.occupancy[nr][nc];
+        if (pi >= 0 && pi < ctx.placements.length) {
+          const p = ctx.placements[pi];
+          const item = ctx.furnitureSet.groups[p.groupIdx]?.items[p.itemIdx];
+          const mult = item?.multiplierStats ?? item?.multiplier ?? 1;
+          if (mult < minCost) minCost = mult;
+        }
+      }
+      cand.blockerCost = minCost;
+    }
+    allGeomValid.sort((a, b) => a.blockerCost - b.blockerCost);
+    candidates.push(...allGeomValid);
+  }
 
   if (candidates.length === 0) return;
 
@@ -2270,10 +2434,51 @@ function doorPhase(ctx) {
       ctx.doors.delete(`${cand.r},${cand.c}`);
       if (avg < bestAvg) { bestAvg = avg; bestIdx = i; }
     }
-    if (bestIdx < 0) break;
+    if (bestIdx < 0) {
+      if (ctx.doors.size === 0) bestIdx = 0;
+      else break;
+    }
     const best = candidates[bestIdx];
     ctx.doors.add(`${best.r},${best.c}`);
     candidates.splice(bestIdx, 1);
+  }
+
+  // Ensure each door has at least one walkable adjacent room tile.
+  // If a door was placed via the allGeomValid fallback, all adjacent tiles may be
+  // blocked. Remove the cheapest blocking piece to guarantee accessibility.
+  for (const key of ctx.doors) {
+    const [dr, dc] = key.split(",").map(Number);
+    let hasWalk = false;
+    for (const [ddr, ddc] of DIRS) {
+      const nr = dr + ddr, nc = dc + ddc;
+      if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW
+          && ctx.room[nr][nc] && ctx.blockerCount[nr][nc] === 0) {
+        hasWalk = true; break;
+      }
+    }
+    if (hasWalk) continue;
+    // Find cheapest adjacent blocking piece to remove
+    let cheapestPi = -1, cheapestMult = Infinity;
+    for (const [ddr, ddc] of DIRS) {
+      const nr = dr + ddr, nc = dc + ddc;
+      if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) continue;
+      const pi = ctx.occupancy[nr][nc];
+      if (pi < ctx.lockedCount || pi >= ctx.placements.length) continue;
+      const p = ctx.placements[pi];
+      const item = ctx.furnitureSet.groups[p.groupIdx]?.items[p.itemIdx];
+      const mult = item?.multiplierStats ?? item?.multiplier ?? 1;
+      if (mult < cheapestMult) { cheapestMult = mult; cheapestPi = pi; }
+    }
+    if (cheapestPi < 0) continue;
+    clearOccupancy(ctx, cheapestPi);
+    const lastPi = ctx.placements.length - 1;
+    if (cheapestPi !== lastPi) {
+      clearOccupancy(ctx, lastPi);
+      ctx.placements[cheapestPi] = ctx.placements[lastPi];
+      setOccupancy(ctx, cheapestPi);
+    }
+    ctx.placements.pop();
+    rebuildGroupCounts(ctx);
   }
 }
 
@@ -2613,12 +2818,16 @@ export async function runOptimizer(input) {
   // Phase 0: Analysis & precomputation
   analyzePhase(ctx);
   preCleanRoom(ctx);
-  await prePlacePillars(ctx);
+  await placeRegularPillars(ctx);
 
-  const initialSnapshot = takeSnapshot(ctx);
+  // Place one early door for indoor buildings (provides structural anchor)
+  const doorCandidates = collectDoorCandidates(ctx);
+  if (doorCandidates.length > 0) applyDoorCandidate(ctx, doorCandidates[0]);
 
   let bestScore = -Infinity;
   let bestSnapshot = null;
+
+  const initialSnapshot = takeSnapshot(ctx);
 
   // Strategy A: Strip-based filling
   restoreSnapshot(ctx, initialSnapshot);
@@ -2628,8 +2837,7 @@ export async function runOptimizer(input) {
     bestSnapshot = stripResult.snapshot;
   }
 
-  // Strategy B–F: Multiple constructive restarts with variation
-  // Generate constructive configs — scale count by room size
+  // Strategy B–N: Multiple constructive restarts with variation
   const roomArea = ctx.roomTiles.length;
   const isLargeRoom = roomArea > 500;
 
@@ -2686,14 +2894,12 @@ export async function runOptimizer(input) {
     }
   }
 
-  // Restore best pre-polish result
+  // Polish the best result
   const bestPrePolish = bestSnapshot;
   restoreSnapshot(ctx, bestSnapshot);
 
-  // Phase 4: Local search polish
   await localSearchPhase(ctx);
 
-  // Phase 5: Trim, doors, validation
   await trimPhase(ctx);
   doorPhase(ctx);
 
@@ -2759,6 +2965,7 @@ function createContext(input) {
     mustReachCache: null, mustReachDirty: true,
     _walkabilityValid: false,
     _doorCandidateCache: undefined,
+    reservedTiles: new Set(),
   };
 
   ctx.occupancy = buildOccupancyGrid(ctx);

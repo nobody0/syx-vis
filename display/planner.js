@@ -2,12 +2,17 @@
 import { buildings } from "../data/buildings.js";
 import { furniture } from "../data/furniture.js";
 import { capitalize, formatResourceName } from "./config.js";
+import {
+  parseSavedPrints, generateSavedPrints, loadBlueprints, saveBlueprints,
+  sosDataToPlanObj, encodePlanObj, planEncodedToSosEntry,
+} from "./blueprint.js";
 import { createAutocomplete } from "./filters.js";
 import { runOptimizer } from "./optimizer.js";
 import { replacePlannerRoute, clearPlannerRoute } from "./router.js";
 import {
   AVAIL_BLOCKING, DIRS, getRotatedTiles, getAllowedRotations,
   fromBase64url, toBase64url, parseBinaryPlan, serializePlanObj,
+  compress, decompress,
 } from "./planner-core.js";
 
 // Re-export for backward compatibility
@@ -147,47 +152,7 @@ function serializeToBinary() {
   });
 }
 
-// parseBinaryPlan → imported from planner-core.js
-
-/** Compress bytes using deflate-raw via CompressionStream. */
-async function compress(data) {
-  const cs = new CompressionStream("deflate-raw");
-  const writer = cs.writable.getWriter();
-  writer.write(data);
-  writer.close();
-  const chunks = [];
-  const reader = cs.readable.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-  const out = new Uint8Array(totalLen);
-  let off = 0;
-  for (const c of chunks) { out.set(c, off); off += c.length; }
-  return out;
-}
-
-/** Decompress deflate-raw bytes via DecompressionStream. */
-async function decompress(data) {
-  const ds = new DecompressionStream("deflate-raw");
-  const writer = ds.writable.getWriter();
-  writer.write(data);
-  writer.close();
-  const chunks = [];
-  const reader = ds.readable.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-  const out = new Uint8Array(totalLen);
-  let off = 0;
-  for (const c of chunks) { out.set(c, off); off += c.length; }
-  return out;
-}
+// parseBinaryPlan, compress, decompress → imported from planner-core.js
 
 /**
  * Serialize the current planner state to a compressed base64url string (async).
@@ -1028,6 +993,7 @@ let sidebarEl = null;
 // ── Grid rendering ──────────────────────────────────────
 
 function buildGrid(container) {
+  hoveredPlacementIdx = -1;
   if (gridEl) gridEl.remove();
   gridEl = el("div", "planner-grid");
   gridEl.style.gridTemplateColumns = `repeat(${state.gridW}, 24px)`;
@@ -1584,6 +1550,7 @@ function clearHoverFeedback() {
 function showTooltip(e, pi) {
   if (!tooltipEl) return;
   const p = state.placements[pi];
+  if (!p) return;
   const fs = state.furnitureSet;
   const bld = state.building;
   const group = fs.groups[p.groupIdx];
@@ -2498,6 +2465,371 @@ function refreshInfoPanel() {
   }
 }
 
+// ── Blueprint Management ─────────────────────────────────
+
+/** Reference to the Blueprints button for updating badge count. */
+let blueprintsBtnRef = null;
+
+function showToast(message) {
+  const toast = elText("div", message, "blueprint-toast");
+  document.body.appendChild(toast);
+  setTimeout(() => toast.classList.add("visible"), 10);
+  setTimeout(() => {
+    toast.classList.remove("visible");
+    setTimeout(() => toast.remove(), 400);
+  }, 3000);
+}
+
+/** Update the Blueprints button badge with current count. */
+function updateBlueprintsBtn() {
+  if (!blueprintsBtnRef) return;
+  const count = loadBlueprints().length;
+  blueprintsBtnRef.textContent = `Blueprints (${count})`;
+}
+
+/** Save the current planner state as a blueprint in the library. */
+async function saveBlueprintToLibrary() {
+  if (!state.buildingId || !state.furnitureSet) return;
+  if (!state.room.flat().some(Boolean)) return;
+
+  const defaultName = capitalize(state.buildingId.replace(/_/g, " "));
+  const name = prompt("Blueprint name:", defaultName);
+  if (name === null) return; // cancelled
+  const finalName = name.trim() || defaultName;
+
+  // Generate compressed plan binary
+  const planEncoded = await serializePlan();
+  if (!planEncoded) return;
+
+  // Get trimmed dimensions for display
+  const trim = trimGrid();
+
+  const bps = loadBlueprints();
+
+  // If editing an existing blueprint, update it
+  if (state._editingBlueprintId) {
+    const idx = bps.findIndex(bp => bp.id === state._editingBlueprintId);
+    if (idx >= 0) {
+      bps[idx].name = finalName;
+      bps[idx].planEncoded = planEncoded;
+      bps[idx].width = trim.w;
+      bps[idx].height = trim.h;
+      bps[idx].savedAt = Date.now();
+      saveBlueprints(bps);
+      showToast(`Blueprint "${finalName}" updated`);
+      updateBlueprintsBtn();
+      return;
+    }
+  }
+
+  // Create new blueprint
+  const bp = {
+    id: crypto.randomUUID(),
+    name: finalName,
+    buildingId: state.buildingId,
+    savedAt: Date.now(),
+    planEncoded,
+    width: trim.w,
+    height: trim.h,
+  };
+  bps.push(bp);
+  saveBlueprints(bps);
+  state._editingBlueprintId = bp.id;
+  showToast(`Blueprint "${finalName}" saved`);
+  updateBlueprintsBtn();
+}
+
+/** Load a blueprint into the planner from a library entry. */
+async function loadBlueprintIntoPlanner(bp) {
+  const result = await deserializePlan(bp.planEncoded);
+  if (result.ok) {
+    state._editingBlueprintId = bp.id;
+    syncUrl();
+  } else {
+    showToast(`Failed to load: ${result.error}`);
+  }
+  return result;
+}
+
+/** Migrate legacy blueprints that have sosEntry but no planEncoded. */
+async function migrateLegacyBlueprints() {
+  const bps = loadBlueprints();
+  let migrated = 0;
+  for (const bp of bps) {
+    if (bp.planEncoded || !bp.sosEntry) continue;
+    try {
+      // Re-parse the sosEntry to extract DATA array
+      const parsed = parseSavedPrints(bp.sosEntry);
+      if (parsed.length === 0) continue;
+      const entry = parsed[0];
+      const fs = furnitureByBuilding.get(entry.buildingId);
+      const planObj = sosDataToPlanObj(entry.data, entry.width, entry.height, entry.buildingId, fs);
+      bp.planEncoded = await encodePlanObj(planObj);
+      bp.width = entry.width;
+      bp.height = entry.height;
+      delete bp.sosEntry;
+      migrated++;
+    } catch (err) {
+      console.warn("Failed to migrate blueprint:", bp.name, err);
+    }
+  }
+  if (migrated > 0) {
+    saveBlueprints(bps);
+  }
+  return migrated;
+}
+
+/** Show the blueprint management modal. */
+async function showBlueprintManager() {
+  // Migrate legacy blueprints on first open
+  const migrated = await migrateLegacyBlueprints();
+
+  const overlay = el("div", "blueprint-overlay");
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  // Escape to close
+  overlay.tabIndex = -1;
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") overlay.remove();
+  });
+
+  const box = el("div", "blueprint-modal blueprint-manager");
+
+  // Header with title + close ×
+  const header = el("div", "blueprint-header");
+  header.appendChild(elText("h3", "Blueprints"));
+  const closeX = elText("button", "\u00D7", "blueprint-close-x");
+  closeX.addEventListener("click", () => overlay.remove());
+  header.appendChild(closeX);
+  box.appendChild(header);
+
+  // Blueprint list
+  const listEl = el("div", "blueprint-list");
+  box.appendChild(listEl);
+
+  function renderList() {
+    listEl.innerHTML = "";
+    const bps = loadBlueprints();
+    if (bps.length === 0) {
+      const empty = elText("div", "No blueprints yet. Save from the planner or import a SavedPrints.txt file.", "blueprint-empty");
+      listEl.appendChild(empty);
+      return;
+    }
+
+    // Sort by building name, then savedAt within each building
+    const sorted = [...bps].sort((a, b) => {
+      const nameA = (buildingById.get(a.buildingId)?.name ?? a.buildingId).toLowerCase();
+      const nameB = (buildingById.get(b.buildingId)?.name ?? b.buildingId).toLowerCase();
+      if (nameA < nameB) return -1;
+      if (nameA > nameB) return 1;
+      return (a.savedAt || 0) - (b.savedAt || 0);
+    });
+
+    let lastBuilding = null;
+    for (const bp of sorted) {
+      const buildingName = buildingById.get(bp.buildingId)?.name ?? bp.buildingId;
+
+      // Group header when building type changes
+      if (buildingName !== lastBuilding) {
+        lastBuilding = buildingName;
+        const groupHeader = elText("div", buildingName, "blueprint-group-header");
+        listEl.appendChild(groupHeader);
+      }
+
+      const item = el("div", "blueprint-item");
+
+      // Highlight the currently-loaded blueprint
+      if (bp.id === state._editingBlueprintId) {
+        item.classList.add("blueprint-item-active");
+      }
+
+      // Left: meta info
+      const meta = el("div", "blueprint-item-meta");
+
+      // Editable name
+      const nameSpan = elText("span", bp.name, "blueprint-item-name");
+      nameSpan.title = "Click to rename";
+      nameSpan.addEventListener("click", () => {
+        const input = el("input", "blueprint-item-name-edit");
+        input.type = "text";
+        input.value = bp.name;
+        input.spellcheck = false;
+        nameSpan.replaceWith(input);
+        input.focus();
+        input.select();
+        let committed = false;
+        const commit = () => {
+          if (committed) return;
+          committed = true;
+          const newName = input.value.trim();
+          if (newName && newName !== bp.name) {
+            bp.name = newName;
+            const all = loadBlueprints();
+            const idx = all.findIndex(b => b.id === bp.id);
+            if (idx >= 0) { all[idx].name = newName; saveBlueprints(all); }
+          }
+          renderList();
+        };
+        input.addEventListener("blur", commit);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") input.blur();
+          if (e.key === "Escape") { e.stopPropagation(); input.value = bp.name; input.blur(); }
+        });
+      });
+      meta.appendChild(nameSpan);
+
+      // Dimensions from stored width/height
+      if (bp.width && bp.height) {
+        meta.appendChild(elText("span", `${bp.width}\u00D7${bp.height}`, "blueprint-item-dims"));
+      }
+
+      item.appendChild(meta);
+
+      // Actions
+      const actions = el("div", "blueprint-item-actions");
+
+      // Load button — all blueprints have planEncoded now
+      const loadBtn = elText("button", "Load", "planner-tool-btn blueprint-load-btn");
+      loadBtn.addEventListener("click", async () => {
+        const result = await loadBlueprintIntoPlanner(bp);
+        if (result?.ok !== false) overlay.remove();
+      });
+      actions.appendChild(loadBtn);
+
+      // Delete button — small ×
+      const deleteBtn = elText("button", "\u00D7", "blueprint-delete-x");
+      deleteBtn.title = `Delete "${bp.name}"`;
+      deleteBtn.addEventListener("click", () => {
+        if (!confirm(`Delete "${bp.name}"?`)) return;
+        const all = loadBlueprints();
+        const filtered = all.filter(b => b.id !== bp.id);
+        saveBlueprints(filtered);
+        if (state._editingBlueprintId === bp.id) state._editingBlueprintId = null;
+        updateBlueprintsBtn();
+        renderList();
+      });
+      actions.appendChild(deleteBtn);
+
+      item.appendChild(actions);
+      listEl.appendChild(item);
+    }
+  }
+  renderList();
+  if (migrated > 0) showToast(`Migrated ${migrated} legacy blueprint${migrated !== 1 ? "s" : ""}`);
+
+  // Footer: Import/Export buttons + path
+  const footer = el("div", "blueprint-footer");
+
+  const footerButtons = el("div", "blueprint-footer-buttons");
+
+  const importBtn = elText("button", "Import from Game", "planner-tool-btn");
+  importBtn.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".txt";
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      if (!file) return;
+      if (file.name !== "SavedPrints.txt") {
+        console.log(`Note: expected SavedPrints.txt, got "${file.name}"`);
+      }
+      const text = await file.text();
+      const entries = parseSavedPrints(text);
+      if (entries.length === 0) {
+        showToast("No blueprints found in file");
+        return;
+      }
+      const bps = loadBlueprints();
+      let added = 0;
+      for (const entry of entries) {
+        // Skip exact duplicates by name+buildingId
+        const dup = bps.some(bp => bp.name === entry.name && bp.buildingId === entry.buildingId);
+        if (dup) continue;
+        const fs = furnitureByBuilding.get(entry.buildingId);
+        const planObj = sosDataToPlanObj(entry.data, entry.width, entry.height, entry.buildingId, fs);
+        const planEncoded = await encodePlanObj(planObj);
+        bps.push({
+          id: crypto.randomUUID(),
+          name: entry.name,
+          buildingId: entry.buildingId,
+          savedAt: Date.now(),
+          planEncoded,
+          width: entry.width,
+          height: entry.height,
+        });
+        added++;
+      }
+      saveBlueprints(bps);
+      showToast(`Imported ${added} blueprint${added !== 1 ? "s" : ""}${entries.length - added > 0 ? ` (${entries.length - added} duplicates skipped)` : ""}`);
+      updateBlueprintsBtn();
+      renderList();
+    });
+    input.click();
+  });
+  footerButtons.appendChild(importBtn);
+
+  const exportBtn = elText("button", "Export to Game", "planner-tool-btn");
+  exportBtn.addEventListener("click", async () => {
+    const bps = loadBlueprints();
+    if (bps.length === 0) {
+      showToast("No blueprints to export");
+      return;
+    }
+    exportBtn.disabled = true;
+    exportBtn.textContent = "Exporting...";
+    try {
+      const results = await Promise.all(
+        bps.map(bp => planEncodedToSosEntry(bp.planEncoded, bp.name, furnitureByBuilding.get(bp.buildingId)))
+      );
+      const sosEntries = results.filter(Boolean);
+      if (sosEntries.length === 0) {
+        showToast("No exportable blueprints (unknown buildings)");
+        return;
+      }
+      const fileText = generateSavedPrints(sosEntries);
+      const blob = new Blob([fileText], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "SavedPrints.txt";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      const skipped = bps.length - sosEntries.length;
+      showToast(`SavedPrints.txt downloaded${skipped > 0 ? ` (${skipped} skipped)` : ""}`);
+      // Show contextual path hint after successful export
+      pathRow.style.display = "flex";
+    } finally {
+      exportBtn.disabled = false;
+      exportBtn.textContent = "Export to Game";
+    }
+  });
+  footerButtons.appendChild(exportBtn);
+  footer.appendChild(footerButtons);
+
+  // Path hint row — hidden by default, shown after export
+  const pathRow = el("div", "blueprint-path-row");
+  pathRow.style.display = "none";
+  const pathHint = elText("span", "\u2713 SavedPrints.txt downloaded \u2014 move it to:", "blueprint-path-hint");
+  pathRow.appendChild(pathHint);
+  const pathText = elText("code", "%APPDATA%\\songsofsyx\\saves\\profile\\", "blueprint-path-text");
+  pathRow.appendChild(pathText);
+  const copyPathBtn = elText("button", "Copy", "planner-tool-btn blueprint-copy-path-btn");
+  copyPathBtn.addEventListener("click", async () => {
+    await navigator.clipboard.writeText("%APPDATA%\\songsofsyx\\saves\\profile\\");
+    copyPathBtn.textContent = "Copied!";
+    setTimeout(() => { copyPathBtn.textContent = "Copy"; }, 2000);
+  });
+  pathRow.appendChild(copyPathBtn);
+  footer.appendChild(pathRow);
+
+  box.appendChild(footer);
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  overlay.focus();
+}
+
 // ── Auto-Optimize ────────────────────────────────────────
 
 async function runAutoOptimize(btn) {
@@ -2614,9 +2946,22 @@ function buildSelector(container) {
   });
   actionsRow.appendChild(copyBtn);
 
+  // Save Blueprint button
+  const saveBtn = elText("button", "Save Blueprint", "planner-tool-btn planner-save-btn");
+  saveBtn.addEventListener("click", () => saveBlueprintToLibrary());
+  actionsRow.appendChild(saveBtn);
+
+  // Blueprints (N) button — opens management modal
+  const bpCount = loadBlueprints().length;
+  const bpBtn = elText("button", `Blueprints (${bpCount})`, "planner-tool-btn planner-blueprints-btn");
+  bpBtn.addEventListener("click", () => showBlueprintManager());
+  actionsRow.appendChild(bpBtn);
+  blueprintsBtnRef = bpBtn;
+
   // Clear All button
   const clearBtn = elText("button", "Clear All", "planner-tool-btn planner-clear-btn");
   clearBtn.addEventListener("click", () => {
+    state._editingBlueprintId = null;
     initRoom();
     recomputeWallMetrics();
     computeStats();
@@ -2649,6 +2994,7 @@ function selectBuilding(buildingId) {
   state.selectedItemIdx = -1;
   state.rotation = 0;
   state.mode = "draw";
+  state._editingBlueprintId = null;
   initRoom();
   undoStack.length = 0;
   preloadBuildingSprites(buildingId, bld);
