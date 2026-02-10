@@ -7,6 +7,11 @@ export const AVAIL_BLOCKING = new Set([
   "AVOID_PASS", "AVOID_LIKE_FUCK", "PENALTY4", // from > 0
 ]);
 
+/** Truly impassable availability values — penalty tiles are still walkable. */
+export const AVAIL_IMPASSABLE = new Set([
+  "SOLID", "NOT_ACCESSIBLE", "ROOM_SOLID",
+]);
+
 /** 4-directional neighbor offsets [row, col]. */
 export const DIRS = [[0, 1], [0, -1], [1, 0], [-1, 0]];
 

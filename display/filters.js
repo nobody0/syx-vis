@@ -200,6 +200,45 @@ export function switchCity(cityId) {
   }
 }
 
+/**
+ * Create a new city with pre-populated building/resource states (for save import).
+ * @param {string} name
+ * @param {Object<string, string>} buildingStates - { buildingId: "built"|"ignored" }
+ * @param {Object<string, string>} resourceStates - { resourceId: "bought"|"ignored" }
+ * @returns {string} cityId
+ */
+export function importCity(name, buildingStates, resourceStates) {
+  const data = _loadCities();
+  // Save current city if active
+  if (data.activeCityId) {
+    _saveCityStates(data.activeCityId);
+  }
+  const id = "city_" + Date.now();
+  const bStates = { world_map: "built", ...buildingStates };
+  data.cities.push({
+    id,
+    name,
+    buildingStates: bStates,
+    recipeStates: {},
+    resourceStates: resourceStates || {},
+  });
+  data.activeCityId = id;
+  _saveCities(data);
+  // Load into filterState
+  filterState.buildingStates.clear();
+  filterState.resourceStates.clear();
+  filterState.recipeStates.clear();
+  for (const [bid, state] of Object.entries(bStates)) {
+    filterState.buildingStates.set(bid, state);
+  }
+  if (resourceStates) {
+    for (const [rid, state] of Object.entries(resourceStates)) {
+      filterState.resourceStates.set(rid, state);
+    }
+  }
+  return id;
+}
+
 /** Deactivate city, reload scratchpad state. */
 export function deactivateCity() {
   const data = _loadCities();

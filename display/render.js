@@ -2,7 +2,8 @@
 import { Application, Container, Graphics, Text, Sprite, Assets } from "pixi.js";
 import { buildGraph } from "../derive/graph.js";
 import { computeLayout, bezierMidpoint, COL_SPACING, ROW_SPACING, BAND_GAP } from "../derive/layout.js";
-import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode, setBuildingState, getBuildingState, getAvailableResources, getCities, getActiveCityId, getActiveCityName, createCity, deleteCity, renameCity, switchCity, deactivateCity } from "./filters.js";
+import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode, setBuildingState, getBuildingState, getAvailableResources, getCities, getActiveCityId, getActiveCityName, createCity, deleteCity, renameCity, switchCity, deactivateCity, importCity } from "./filters.js";
+import { parseSaveFile } from "./save-import.js";
 import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAND_COLORS, capitalize } from "./config.js";
 import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, DASH_PATTERNS, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
 import { createZoomController } from "./pixi-zoom.js";
@@ -2935,6 +2936,31 @@ function buildCitySelector(onFilterChange) {
   });
   container.appendChild(addBtn);
 
+  // Import save button
+  const importBtn = document.createElement("button");
+  importBtn.className = "city-btn city-import-btn";
+  importBtn.innerHTML = "&#x1F4C2;";
+  importBtn.title = "Import from .save file";
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = ".save";
+  fileInput.style.display = "none";
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    fileInput.value = "";
+    try {
+      const buf = await file.arrayBuffer();
+      const result = await parseSaveFile(buf, file.name);
+      showSaveImportModal(result, onFilterChange);
+    } catch (err) {
+      alert("Failed to parse save file: " + err.message);
+    }
+  });
+  importBtn.addEventListener("click", () => fileInput.click());
+  importBtn.appendChild(fileInput);
+  container.appendChild(importBtn);
+
   // Rename/delete only when city is active
   if (activeCityId) {
     const renameBtn = document.createElement("button");
@@ -2963,6 +2989,245 @@ function buildCitySelector(onFilterChange) {
     });
     container.appendChild(delBtn);
   }
+}
+
+// ══════════════════════════════════════════════════════════
+// Save import modal
+// ══════════════════════════════════════════════════════════
+
+function showSaveImportModal(result, onFilterChange) {
+  const { cityName, population, buildingIds } = result;
+
+  // Group buildings by category using fullNodes
+  const groups = new Map(); // category → [{id, name, icon}]
+  for (const id of buildingIds) {
+    const node = fullNodes.get(id);
+    if (!node) continue;
+    const cat = node.category || "unknown";
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push({ id, name: node.name, icon: node.icon });
+  }
+  // Sort groups by category name, items by name within
+  const sortedCats = [...groups.keys()].sort();
+  for (const cat of sortedCats) groups.get(cat).sort((a, b) => a.name.localeCompare(b.name));
+
+  // Build full resource list for manual selection when import depot detected
+  const allResources = [];
+  const hasImportDepot = buildingIds.includes("_import");
+  if (hasImportDepot) {
+    for (const [id, node] of fullNodes) {
+      if (node.type === "resource") {
+        allResources.push({ id, name: node.name, icon: node.icon, category: node.category });
+      }
+    }
+    allResources.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // Track checked state
+  const buildingChecked = new Map();
+  for (const id of buildingIds) buildingChecked.set(id, true);
+  const resourceChecked = new Map();
+  if (hasImportDepot) {
+    for (const r of allResources) resourceChecked.set(r.id, false);
+  }
+
+  // Create overlay
+  const overlay = document.createElement("div");
+  overlay.className = "blueprint-overlay";
+
+  const modal = document.createElement("div");
+  modal.className = "blueprint-modal save-import-modal";
+  modal.addEventListener("click", (e) => e.stopPropagation());
+
+  // Header
+  const header = document.createElement("div");
+  header.className = "blueprint-header";
+  const title = document.createElement("h3");
+  title.textContent = "Import Save";
+  header.appendChild(title);
+  const closeX = document.createElement("button");
+  closeX.className = "blueprint-close-x";
+  closeX.textContent = "\u00D7";
+  closeX.addEventListener("click", () => overlay.remove());
+  header.appendChild(closeX);
+  modal.appendChild(header);
+
+  // City name input
+  const nameRow = document.createElement("div");
+  nameRow.className = "save-import-name-row";
+  const nameLabel = document.createElement("label");
+  nameLabel.textContent = "City name:";
+  nameLabel.className = "save-import-label";
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.value = cityName;
+  nameInput.className = "save-import-name-input";
+  nameRow.appendChild(nameLabel);
+  nameRow.appendChild(nameInput);
+  modal.appendChild(nameRow);
+
+  // Summary
+  const summary = document.createElement("div");
+  summary.className = "save-import-summary";
+  const popStr = population != null ? ` (population: ${population.toLocaleString()})` : "";
+  summary.textContent = `Found ${buildingIds.length} buildings${popStr}`;
+  modal.appendChild(summary);
+
+  // Scrollable body
+  const body = document.createElement("div");
+  body.className = "save-import-body";
+
+  // Buildings section
+  const bldSection = document.createElement("div");
+  bldSection.className = "save-import-section";
+  const bldHeader = document.createElement("div");
+  bldHeader.className = "save-import-section-header";
+  const bldTitle = document.createElement("span");
+  bldTitle.textContent = "Buildings";
+  bldTitle.className = "save-import-section-title";
+  bldHeader.appendChild(bldTitle);
+  const bldToggle = document.createElement("button");
+  bldToggle.className = "save-import-toggle-btn";
+  bldToggle.textContent = "Deselect All";
+  let bldAllChecked = true;
+  bldToggle.addEventListener("click", () => {
+    bldAllChecked = !bldAllChecked;
+    bldToggle.textContent = bldAllChecked ? "Deselect All" : "Select All";
+    for (const id of buildingChecked.keys()) buildingChecked.set(id, bldAllChecked);
+    bldSection.querySelectorAll("input[type=checkbox]").forEach(cb => { cb.checked = bldAllChecked; });
+  });
+  bldHeader.appendChild(bldToggle);
+  bldSection.appendChild(bldHeader);
+
+  for (const cat of sortedCats) {
+    const items = groups.get(cat);
+    const catGroup = document.createElement("div");
+    catGroup.className = "save-import-cat-group";
+    const catLabel = document.createElement("div");
+    catLabel.className = "save-import-cat-label";
+    catLabel.textContent = `${capitalize(cat)} (${items.length})`;
+    const color = BUILDING_COLORS[cat];
+    if (color) catLabel.style.borderLeftColor = color;
+    catGroup.appendChild(catLabel);
+
+    const grid = document.createElement("div");
+    grid.className = "save-import-grid";
+    for (const item of items) {
+      const label = document.createElement("label");
+      label.className = "save-import-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = true;
+      cb.addEventListener("change", () => buildingChecked.set(item.id, cb.checked));
+      label.appendChild(cb);
+      if (item.icon) {
+        const img = document.createElement("img");
+        img.src = `data/icons/${item.icon}`;
+        img.alt = item.name;
+        img.className = "save-import-icon";
+        label.appendChild(img);
+      }
+      const span = document.createElement("span");
+      span.textContent = item.name;
+      label.appendChild(span);
+      grid.appendChild(label);
+    }
+    catGroup.appendChild(grid);
+    bldSection.appendChild(catGroup);
+  }
+  body.appendChild(bldSection);
+
+  // Resources section (only if import depot detected)
+  if (hasImportDepot) {
+    const resSection = document.createElement("div");
+    resSection.className = "save-import-section";
+    const resHeader = document.createElement("div");
+    resHeader.className = "save-import-section-header";
+    const resTitle = document.createElement("span");
+    resTitle.className = "save-import-section-title";
+    resTitle.textContent = "Imported Resources";
+    resHeader.appendChild(resTitle);
+    const resHint = document.createElement("span");
+    resHint.className = "save-import-hint";
+    resHint.textContent = "Check resources your city imports";
+    resHeader.appendChild(resHint);
+    const resToggle = document.createElement("button");
+    resToggle.className = "save-import-toggle-btn";
+    let resAllChecked = false;
+    resToggle.textContent = "Select All";
+    resToggle.addEventListener("click", () => {
+      resAllChecked = !resAllChecked;
+      resToggle.textContent = resAllChecked ? "Deselect All" : "Select All";
+      for (const id of resourceChecked.keys()) resourceChecked.set(id, resAllChecked);
+      resSection.querySelectorAll("input[type=checkbox]").forEach(cb => { cb.checked = resAllChecked; });
+    });
+    resHeader.appendChild(resToggle);
+    resSection.appendChild(resHeader);
+
+    const resGrid = document.createElement("div");
+    resGrid.className = "save-import-grid";
+    for (const r of allResources) {
+      const label = document.createElement("label");
+      label.className = "save-import-item";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = resourceChecked.get(r.id) || false;
+      cb.addEventListener("change", () => resourceChecked.set(r.id, cb.checked));
+      label.appendChild(cb);
+      if (r.icon) {
+        const img = document.createElement("img");
+        img.src = `data/icons/${r.icon}`;
+        img.alt = r.name;
+        img.className = "save-import-icon";
+        label.appendChild(img);
+      }
+      const span = document.createElement("span");
+      span.textContent = r.name;
+      label.appendChild(span);
+      resGrid.appendChild(label);
+    }
+    resSection.appendChild(resGrid);
+    body.appendChild(resSection);
+  }
+
+  modal.appendChild(body);
+
+  // Footer buttons
+  const footer = document.createElement("div");
+  footer.className = "save-import-footer";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "save-import-cancel-btn";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.addEventListener("click", () => overlay.remove());
+  footer.appendChild(cancelBtn);
+  const confirmBtn = document.createElement("button");
+  confirmBtn.className = "save-import-confirm-btn";
+  confirmBtn.textContent = "Import";
+  confirmBtn.addEventListener("click", () => {
+    const bStates = {};
+    for (const [id, checked] of buildingChecked) {
+      if (checked) bStates[id] = "built";
+    }
+    const rStates = {};
+    for (const [id, checked] of resourceChecked) {
+      if (checked) rStates[id] = "bought";
+    }
+    const name = nameInput.value.trim() || cityName;
+    importCity(name, bStates, rStates);
+    overlay.remove();
+    buildCitySelector(onFilterChange);
+    onFilterChange();
+  });
+  footer.appendChild(confirmBtn);
+  modal.appendChild(footer);
+
+  overlay.appendChild(modal);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+  nameInput.focus();
+  nameInput.select();
 }
 
 // ══════════════════════════════════════════════════════════

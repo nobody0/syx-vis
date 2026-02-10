@@ -10,13 +10,13 @@ import { createAutocomplete } from "./filters.js";
 import { runOptimizer } from "./optimizer.js";
 import { replacePlannerRoute, clearPlannerRoute } from "./router.js";
 import {
-  AVAIL_BLOCKING, DIRS, getRotatedTiles, getAllowedRotations,
+  AVAIL_BLOCKING, AVAIL_IMPASSABLE, DIRS, getRotatedTiles, getAllowedRotations,
   fromBase64url, toBase64url, parseBinaryPlan, serializePlanObj,
   compress, decompress,
 } from "./planner-core.js";
 
 // Re-export for backward compatibility
-export { AVAIL_BLOCKING, getRotatedTiles, getAllowedRotations, DIRS };
+export { AVAIL_BLOCKING, AVAIL_IMPASSABLE, getRotatedTiles, getAllowedRotations, DIRS };
 
 const LS_KEY = "syx-vis-planner-state";
 
@@ -629,7 +629,7 @@ function buildBlockerMap() {
         const gc = p.col + c;
         if (gr < 0 || gr >= state.gridH || gc < 0 || gc >= state.gridW) continue;
         const tt = fs.tileTypes[tileKey];
-        if (tt && AVAIL_BLOCKING.has(tt.availability)) {
+        if (tt && AVAIL_IMPASSABLE.has(tt.availability)) {
           blocked[gr][gc] = true;
         }
       }
@@ -665,7 +665,7 @@ function getFurnitureTileAt(r, c) {
 function isBlockerAt(r, c, proposedBlockers) {
   if (proposedBlockers.has(`${r},${c}`)) return true;
   const tt = getFurnitureTileAt(r, c);
-  return tt !== null && AVAIL_BLOCKING.has(tt.availability);
+  return tt !== null && AVAIL_IMPASSABLE.has(tt.availability);
 }
 
 /**
@@ -712,7 +712,7 @@ function canPlace(groupIdx, itemIdx, rotation, row, col) {
       if (getPlacementAt(gr, gc) !== null) return { ok: false, reason: "Overlaps furniture" };
       proposedTiles.push({ gr, gc, tileKey });
       const tt = fs.tileTypes[tileKey];
-      if (tt && AVAIL_BLOCKING.has(tt.availability)) {
+      if (tt && AVAIL_IMPASSABLE.has(tt.availability)) {
         proposedBlockers.add(`${gr},${gc}`);
       }
     }
@@ -738,7 +738,7 @@ function canPlace(groupIdx, itemIdx, rotation, row, col) {
   // Pass 3: will-block-other-items — placing a blocker must not fully surround existing mustBeReachable
   for (const { gr, gc, tileKey } of proposedTiles) {
     const tt = fs.tileTypes[tileKey];
-    if (!tt || !AVAIL_BLOCKING.has(tt.availability)) continue;
+    if (!tt || !AVAIL_IMPASSABLE.has(tt.availability)) continue;
     for (const [dr, dc] of DIRS) {
       const nr = gr + dr;
       const nc = gc + dc;
@@ -877,30 +877,30 @@ function checkWalkability() {
   const queue = [];
   let totalOpen = 0;
 
-  // Find first walkable room tile and count total open tiles
+  // Seed BFS from every connected component
+  let reached = 0;
   for (let r = 0; r < state.gridH; r++) {
     for (let c = 0; c < state.gridW; c++) {
       if (state.room[r][c] && !blocked[r][c]) {
         totalOpen++;
-        if (queue.length === 0) {
-          queue.push([r, c]);
+        if (!visited[r][c]) {
           visited[r][c] = true;
+          reached++;
+          queue.push([r, c]);
+          // Drain this component
+          while (queue.length > 0) {
+            const [cr, cc] = queue.shift();
+            for (const [dr, dc] of DIRS) {
+              const nr = cr + dr, nc = cc + dc;
+              if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) continue;
+              if (visited[nr][nc] || !state.room[nr][nc] || blocked[nr][nc]) continue;
+              visited[nr][nc] = true;
+              reached++;
+              queue.push([nr, nc]);
+            }
+          }
         }
       }
-    }
-  }
-
-  let reached = queue.length > 0 ? 1 : 0;
-  while (queue.length > 0) {
-    const [cr, cc] = queue.shift();
-    for (const [dr, dc] of DIRS) {
-      const nr = cr + dr;
-      const nc = cc + dc;
-      if (nr < 0 || nr >= state.gridH || nc < 0 || nc >= state.gridW) continue;
-      if (visited[nr][nc] || !state.room[nr][nc] || blocked[nr][nc]) continue;
-      visited[nr][nc] = true;
-      reached++;
-      queue.push([nr, nc]);
     }
   }
 
@@ -2230,7 +2230,7 @@ function refreshValidation() {
     }
   }
   if (walk.disconnected > 0) {
-    warnings.push({ type: "error", msg: `${walk.disconnected} room tile(s) disconnected — room is split` });
+    warnings.push({ type: "warn", msg: `${walk.disconnected} room tile(s) disconnected — room has separate zones` });
   }
 
   if (warnings.length === 0 && state.placements.length > 0) {
@@ -2957,6 +2957,20 @@ function buildSelector(container) {
   bpBtn.addEventListener("click", () => showBlueprintManager());
   actionsRow.appendChild(bpBtn);
   blueprintsBtnRef = bpBtn;
+
+  // Clear Furniture button — removes placements but keeps room shape, walls, doors
+  const clearFurnBtn = elText("button", "Clear Furniture", "planner-tool-btn planner-clear-btn");
+  clearFurnBtn.addEventListener("click", () => {
+    if (state.placements.length === 0) return;
+    pushUndo();
+    state.placements = [];
+    computeStats();
+    refreshGrid();
+    refreshPalette();
+    refreshStats();
+    refreshValidation();
+  });
+  actionsRow.appendChild(clearFurnBtn);
 
   // Clear All button
   const clearBtn = elText("button", "Clear All", "planner-tool-btn planner-clear-btn");
