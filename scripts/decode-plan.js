@@ -179,8 +179,8 @@ if (fs) {
   console.log();
 }
 
-// Placements table
-if (plan.placements.length > 0 && fs) {
+// Placements table (verbose only)
+if (verbose && plan.placements.length > 0 && fs) {
   console.log("Placements:");
   console.log("  #  Group       Item  Mult  Rot  Row,Col  Tiles");
   console.log("  " + "-".repeat(62));

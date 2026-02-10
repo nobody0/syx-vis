@@ -49,27 +49,43 @@ function hashSeed(str) {
 // Pre-allocated buffer for tileSupport (replaces per-call Set allocation)
 const _tileSupportBuf = new Int32Array(128);
 
-// Pre-compute stability rays (same as planner.js)
+// Pre-compute stability rays using DDA matching game's TileRayTracer.java
 const SUPPORT_RAYS = [];
-function bresenhamLine(x0, y0, x1, y1) {
-  const steps = [];
-  let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
-  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
-  let err = dx - dy;
-  let cx = x0, cy = y0;
-  while (cx !== x1 || cy !== y1) {
-    const e2 = 2 * err;
-    if (e2 > -dy) { err -= dy; cx += sx; }
-    if (e2 < dx) { err += dx; cy += sy; }
-    steps.push({ dx: cx - x0, dy: cy - y0 });
+{
+  const has = Array.from({ length: SUPPORT_RADIUS * 2 + 1 }, () => new Uint8Array(SUPPORT_RADIUS * 2 + 1));
+  function ddaRay(fromx, fromy) {
+    let x = fromx, y = fromy;
+    const ax = Math.abs(x), ay = Math.abs(y);
+    const divider = ax > ay ? ax : (ax < ay ? ay : ax);
+    if (divider === 0) return;
+    const dx = -x / divider, dy = -y / divider;
+    let i = 0;
+    while (i < divider) {
+      const tx = Math.trunc(x), ty = Math.trunc(y);
+      if (Math.floor(Math.sqrt(x * x + y * y)) <= SUPPORT_RADIUS) {
+        if (has[ty + SUPPORT_RADIUS][tx + SUPPORT_RADIUS]) return;
+        has[ty + SUPPORT_RADIUS][tx + SUPPORT_RADIUS] = 1;
+        break;
+      }
+      x += dx; y += dy; i++;
+    }
+    const coos = [];
+    while (true) {
+      const tx = Math.trunc(x), ty = Math.trunc(y);
+      if (tx === 0 && ty === 0) break;
+      coos.push({ dx: tx, dy: ty });
+      x += dx; y += dy;
+    }
+    coos.reverse();
+    if (coos.length > 0) SUPPORT_RAYS.push(coos);
   }
-  return steps;
-}
-for (let dx = -SUPPORT_RADIUS; dx <= SUPPORT_RADIUS; dx++) {
-  for (let dy = -SUPPORT_RADIUS; dy <= SUPPORT_RADIUS; dy++) {
-    if (Math.max(Math.abs(dx), Math.abs(dy)) !== SUPPORT_RADIUS) continue;
-    const steps = bresenhamLine(0, 0, dx, dy);
-    if (steps.length > 0) SUPPORT_RAYS.push(steps);
+  for (let gy = -SUPPORT_RADIUS; gy <= SUPPORT_RADIUS; gy++) {
+    ddaRay(-SUPPORT_RADIUS, gy);
+    ddaRay(SUPPORT_RADIUS, gy);
+  }
+  for (let gx = -SUPPORT_RADIUS; gx <= SUPPORT_RADIUS; gx++) {
+    ddaRay(gx, -SUPPORT_RADIUS);
+    ddaRay(gx, SUPPORT_RADIUS);
   }
 }
 

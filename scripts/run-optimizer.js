@@ -84,7 +84,9 @@ const optimizerInput = {
   doors: new Set(plan.doors.map(d => `${d[0]},${d[1]}`)),
 };
 
+const t0 = performance.now();
 const result = await runOptimizer(optimizerInput);
+const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
 
 // Convert result back to plan object
 const resultPlan = {
@@ -105,7 +107,7 @@ const saveString = toBase64url(versioned);
 
 console.log(saveString);
 
-console.error(`Result: ${result.placements.length} placements, ${result.room.flat().filter(Boolean).length} room tiles`);
+console.error(`Result: ${result.placements.length} placements, ${result.room.flat().filter(Boolean).length} room tiles (${elapsed}s)`);
 
 // Optionally decode the result
 if (decode) {
