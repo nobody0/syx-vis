@@ -75,9 +75,9 @@ Starter (empty room):
 http://localhost:3000/#planner/AuMrSk3LzEstik9KzE4tqhThZ2Bg__-v_v9zPAQDCAAA
 ```
 
-Previous best — **42 workers**:
+Previous best — **43 workers**:
 ```
-http://localhost:3000/#planner/Aj2NzQoCMQyEZ5LV_qysrPp-olBBBA-9eXD3cfsGHltTBA8Z5guZyZTT7f5M-Xy9PFJ-nfaAa5-1lVbXUmp9t7IsP_wLgCMUnAUgBRwJ5W7sOHQn3TmICIVgtJNw6InJ0EeoBovBK-3bxup0sBFvu60DNURO8Qs
+http://localhost:3000/#planner/AQ5yZWZpbmVyX2Jha2VyeRQPAAAH__5__-f__n_v5__-ff_nfn5__-f__n__5__-f__n__4AAAATAAMAARECAAABAQIBAQoBAAMBDAsCAAABBwADAQwDAgAAAgkAAwICAQIAAAEKAgABCRIAAwIBDgIAAAYLAAMDCQMCAAAFCwACAQQEAgEACAYCAQEBDQEAAAYHAAADCQwFAAQAEA4CAAYABQ
 ```
 
 ### 2. Carpenter — 20x15 rectangle

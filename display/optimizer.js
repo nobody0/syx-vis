@@ -80,6 +80,7 @@ function debugValidateState(ctx) {
   const refOcc = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
   const refBc = Array.from({ length: gridH }, () => new Int8Array(gridW));
   const refGg = Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1));
+  const refMrg = new Int8Array(gridW * gridH);
   let refOccCount = 0;
   for (let pi = 0; pi < placements.length; pi++) {
     const p = placements[pi];
@@ -95,6 +96,7 @@ function debugValidateState(ctx) {
           refGg[gr][gc] = p.groupIdx;
           const tt = fs.tileTypes[tileKey];
           if (tt && AVAIL_BLOCKING.has(tt.availability)) refBc[gr][gc]++;
+          if (tt?.mustBeReachable) refMrg[gr * gridW + gc] = 1;
         }
       }
     }
@@ -107,6 +109,8 @@ function debugValidateState(ctx) {
         console.error(`[DBG] blockerCount mismatch at ${r},${c}: live=${ctx.blockerCount[r][c]} ref=${refBc[r][c]}`);
       if (ctx.groupGrid[r][c] !== refGg[r][c])
         console.error(`[DBG] groupGrid mismatch at ${r},${c}: live=${ctx.groupGrid[r][c]} ref=${refGg[r][c]}`);
+      if (ctx.mustReachGrid[r * gridW + c] !== refMrg[r * gridW + c])
+        console.error(`[DBG] mustReachGrid mismatch at ${r},${c}: live=${ctx.mustReachGrid[r * gridW + c]} ref=${refMrg[r * gridW + c]}`);
     }
   }
   if (ctx.occupiedCount !== refOccCount)
@@ -150,24 +154,31 @@ export async function runOptimizer(input) {
   // Save initial state (post-pillar) for multi-restart
   const initialSnapshot = takeSnapshot(ctx);
 
-  // Multi-restart: run constructive+SA+polish twice, keep best
+  // Multi-restart: run constructive+SA+polish 3 times, keep best
+  // Restart 0: standard constructive
+  // Restart 1: diversity (skip every 4th hero)
+  // Restart 2: neatness-aware constructive (H4/H5 facing heuristics)
   let bestResult = null;
   let bestResultScore = -Infinity;
 
-  for (let restart = 0; restart < 2; restart++) {
+  for (let restart = 0; restart < 3; restart++) {
     if (restart > 0) {
       restoreSnapshot(ctx, initialSnapshot);
       ctx.rng = createRNG(ctx.baseSeed + restart);
     }
 
     // Phase 1: Smart constructive phase (hero-first)
-    // Restart 1: skip every 4th hero placement for diversity
-    const skipInterval = restart === 0 ? 0 : 4;
+    const skipInterval = restart === 1 ? 4 : 0;
+    const isNeatnessRestart = restart === 2;
+    ctx.useNeatnessPlacement = isNeatnessRestart;
+    ctx.useNeatnessSA = isNeatnessRestart;
     await constructivePhase(ctx, skipInterval);
+    ctx.useNeatnessPlacement = false;
     ctx.constructiveSnapshot = takeSnapshot(ctx);
 
     // Phase 2: Simulated annealing
     await simulatedAnnealing(ctx);
+    ctx.useNeatnessSA = false;
 
     // Phase 2.5: Post-SA polish
     await polishPhase(ctx);
@@ -281,6 +292,8 @@ function createContext(input) {
     occupiedCount: 0,
     // Incremental group-identity grid for type-aware alignment scoring
     groupGrid: Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1)),
+    // H1/H2: mustBeReachable grid for walkable-sharing and blocker-packing heuristics
+    mustReachGrid: new Int8Array(gridW * gridH),
     // B1: Stamp-based visited buffer (shared across BFS functions)
     visitedBuf: new Uint32Array(gridW * gridH),
     visitedStamp: 0,
@@ -384,9 +397,10 @@ function rebuildGroupCounts(ctx) {
 function buildOccupancyGrid(ctx) {
   const { gridW, gridH, placements, furnitureSet: fs } = ctx;
   const grid = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
-  // Reset blocker count, occupied count, and group grid
+  // Reset blocker count, occupied count, group grid, and mustReachGrid
   const bc = Array.from({ length: gridH }, () => new Int8Array(gridW));
   const gg = Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1));
+  const mrg = new Int8Array(gridW * gridH);
   let occCount = 0;
   for (let pi = 0; pi < placements.length; pi++) {
     const p = placements[pi];
@@ -404,12 +418,16 @@ function buildOccupancyGrid(ctx) {
           if (tt && AVAIL_BLOCKING.has(tt.availability)) {
             bc[gr][gc]++;
           }
+          if (tt?.mustBeReachable) {
+            mrg[gr * gridW + gc] = 1;
+          }
         }
       }
     }
   }
   ctx.blockerCount = bc;
   ctx.groupGrid = gg;
+  ctx.mustReachGrid = mrg;
   ctx.occupiedCount = occCount;
   ctx.statsDirty = true;
   ctx.stabilityDirty = true;
@@ -440,6 +458,10 @@ function setOccupancy(ctx, pi) {
       if (tt && AVAIL_BLOCKING.has(tt.availability)) {
         ctx.blockerCount[gr][gc]++;
       }
+      // H1/H2: Update mustReachGrid
+      if (tt?.mustBeReachable) {
+        ctx.mustReachGrid[gr * ctx.gridW + gc] = 1;
+      }
     }
   }
   ctx.statsDirty = true;
@@ -469,6 +491,10 @@ function clearOccupancy(ctx, pi) {
           const tt = fs.tileTypes[tileKey];
           if (tt && AVAIL_BLOCKING.has(tt.availability)) {
             ctx.blockerCount[gr][gc]--;
+          }
+          // H1/H2: Clear mustReachGrid
+          if (tt?.mustBeReachable) {
+            ctx.mustReachGrid[gr * ctx.gridW + gc] = 0;
           }
         }
       }
@@ -678,8 +704,70 @@ function scoreLayoutSA(ctx) {
     if (runLen >= 3) walkwayBonus += runLen;
   }
 
+  // H1/H2/H3: Neatness bonuses — only computed during neatness restart (restart 2).
+  // Skipping the grid scan entirely on restarts 0/1 avoids ~gridW*gridH wasted iterations
+  // per scoring call (significant for large rooms like 40x40 Smithy).
+  let neatBonus = 0;
+  if (ctx.useNeatnessSA) {
+    let walkableSharingBonus = 0;
+    let blockerPackingBonus = 0;
+    let deadSpacePenalty = 0;
+
+    for (let r = 0; r < gridH; r++) {
+      for (let c = 0; c < gridW; c++) {
+        if (!ctx.room[r][c]) continue;
+
+        const isOccupied = ctx.occupancy[r][c] >= 0;
+        const isBlocked = ctx.blockerCount[r][c] > 0;
+        const isMustReach = ctx.mustReachGrid[r * gridW + c] === 1;
+
+        if (!isOccupied && !isBlocked) {
+          // H1: Walkable tile — count adjacent mustBeReachable tiles
+          let adjMR = 0;
+          for (const [dr, dc] of DIRS) {
+            const nr = r + dr, nc = c + dc;
+            if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
+                && ctx.mustReachGrid[nr * gridW + nc] === 1) {
+              adjMR++;
+            }
+          }
+          if (adjMR >= 2) walkableSharingBonus += adjMR * (adjMR - 1) / 2;
+
+          // H3: Dead space — 3+ blocked/wall neighbors, no adjacent mustReachable
+          if (adjMR === 0) {
+            let blockedNeighbors = 0;
+            for (const [dr, dc] of DIRS) {
+              const nr = r + dr, nc = c + dc;
+              if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) {
+                blockedNeighbors++;
+              } else if (ctx.blockerCount[nr][nc] > 0) {
+                blockedNeighbors++;
+              }
+            }
+            if (blockedNeighbors >= 3) deadSpacePenalty++;
+          }
+        } else if (isBlocked && !isMustReach) {
+          // H2: Blocking non-mustReachable tile — count adjacent blockers/walls
+          let packedNeighbors = 0;
+          for (const [dr, dc] of DIRS) {
+            const nr = r + dr, nc = c + dc;
+            if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) {
+              packedNeighbors++;
+            } else if (ctx.blockerCount[nr][nc] > 0) {
+              packedNeighbors++;
+            }
+          }
+          blockerPackingBonus += packedNeighbors;
+        }
+      }
+    }
+
+    neatBonus = walkableSharingBonus * 4 + blockerPackingBonus - deadSpacePenalty * 2;
+  }
+
   return primary * 1000 + secondary + effBonus + relBonus + packingBonus
          + alignBonus * 2 + typeAlignBonus * 2 + walkwayBonus * 0.5
+         + neatBonus
          - totalCost * 0.001 - effPenalty - relPenalty
          - stabilityPenalty - roomPenalty;
 }
@@ -1510,14 +1598,79 @@ function getValueDensity(ctx, gi, ii) {
   return statContrib / tileCount;
 }
 
+/** Compute neatness score in the neighborhood of a placed piece.
+ *  Used by polish rotation pass to compare orientations with full neatness weights.
+ *  Evaluates H1 (walkable-sharing), H2 (blocker-packing), H3 (dead-space) within ±2 tiles of the piece.
+ *  NOTE: The H1/H2/H3 logic is intentionally duplicated from scoreLayoutSA's neatness scan —
+ *  this version operates on a local bounding box for O(piece_area) instead of O(grid_area). */
+function computeLocalNeatness(ctx, pi) {
+  const p = ctx.placements[pi];
+  const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+  const { gridW, gridH } = ctx;
+
+  // Collect unique cells in the neighborhood (piece tiles + 2-cell border)
+  const minR = Math.max(0, p.row - 2), maxR = Math.min(gridH - 1, p.row + tiles.length + 1);
+  const minC = Math.max(0, p.col - 2);
+  let maxC = p.col + 1;
+  for (let r = 0; r < tiles.length; r++) {
+    const rowLen = tiles[r]?.length ?? 0;
+    if (p.col + rowLen + 1 > maxC) maxC = p.col + rowLen + 1;
+  }
+  maxC = Math.min(gridW - 1, maxC);
+
+  let walkableSharingBonus = 0;
+  let blockerPackingBonus = 0;
+  let deadSpacePenalty = 0;
+
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      if (!ctx.room[r][c]) continue;
+
+      const isOccupied = ctx.occupancy[r][c] >= 0;
+      const isBlocked = ctx.blockerCount[r][c] > 0;
+      const isMustReach = ctx.mustReachGrid[r * gridW + c] === 1;
+
+      if (!isOccupied && !isBlocked) {
+        let adjMR = 0;
+        for (const [dr, dc] of DIRS) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
+              && ctx.mustReachGrid[nr * gridW + nc] === 1) adjMR++;
+        }
+        if (adjMR >= 2) walkableSharingBonus += adjMR * (adjMR - 1) / 2;
+        if (adjMR === 0) {
+          let blockedNeighbors = 0;
+          for (const [dr, dc] of DIRS) {
+            const nr = r + dr, nc = c + dc;
+            if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) blockedNeighbors++;
+            else if (ctx.blockerCount[nr][nc] > 0) blockedNeighbors++;
+          }
+          if (blockedNeighbors >= 3) deadSpacePenalty++;
+        }
+      } else if (isBlocked && !isMustReach) {
+        let packedNeighbors = 0;
+        for (const [dr, dc] of DIRS) {
+          const nr = r + dr, nc = c + dc;
+          if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) packedNeighbors++;
+          else if (ctx.blockerCount[nr][nc] > 0) packedNeighbors++;
+        }
+        blockerPackingBonus += packedNeighbors;
+      }
+    }
+  }
+
+  return walkableSharingBonus * 4 + blockerPackingBonus - deadSpacePenalty * 2;
+}
+
 /** Score a candidate placement position: value density + wall/corner adjacency + furniture proximity.
- *  Phase 2a: Wall-first rebalancing. Phase 2b: No distance-2 bonus. */
+ *  Phase 2a: Wall-first rebalancing. When ctx.useNeatnessPlacement is set, also adds H5 facing bonus. */
 function scorePlacementPosition(ctx, gi, ii, rot, r, c) {
   let posScore = getValueDensity(ctx, gi, ii);
   const tiles = getCachedTiles(ctx, gi, ii, rot);
   let wallAdj = 0;
   let cornerAdj = 0;
   let furnitureAdj = 0;
+  let facingBonus = 0;
   for (let tr = 0; tr < tiles.length; tr++) {
     for (let tc = 0; tc < (tiles[tr]?.length ?? 0); tc++) {
       if (tiles[tr][tc] === null) continue;
@@ -1533,9 +1686,34 @@ function scorePlacementPosition(ctx, gi, ii, rot, r, c) {
         }
       }
       if (tileWallCount >= 2) cornerAdj++;
+
+      // H5: MR tiles facing existing MR across a 1-tile walkable gap (neatness restart only)
+      if (ctx.useNeatnessPlacement) {
+        const tileKey = tiles[tr][tc];
+        const tt = ctx.furnitureSet.tileTypes[tileKey];
+        const isBlocking = tt && AVAIL_BLOCKING.has(tt.availability);
+        const isMR = tt?.mustBeReachable;
+        // Blocker against wall = good; MR against wall = prefer open access
+        if (isBlocking && !isMR && tileWallCount > 0) facingBonus += tileWallCount;
+        if (isMR && tileWallCount > 0) facingBonus -= 0.5 * tileWallCount;
+        if (isMR) {
+          for (const [dr, dc] of DIRS) {
+            const nr2 = gr + dr * 2, nc2 = gc + dc * 2;
+            if (nr2 >= 0 && nr2 < ctx.gridH && nc2 >= 0 && nc2 < ctx.gridW
+                && ctx.mustReachGrid[nr2 * ctx.gridW + nc2] === 1) {
+              const nr1 = gr + dr, nc1 = gc + dc;
+              if (nr1 >= 0 && nr1 < ctx.gridH && nc1 >= 0 && nc1 < ctx.gridW
+                  && ctx.room[nr1][nc1] && ctx.blockerCount[nr1][nc1] === 0
+                  && ctx.occupancy[nr1][nc1] < 0) {
+                facingBonus += 2.5;
+              }
+            }
+          }
+        }
+      }
     }
   }
-  return posScore + wallAdj * 3.0 + furnitureAdj + cornerAdj * 1.5;
+  return posScore + wallAdj * 3.0 + furnitureAdj + cornerAdj * 1.5 + facingBonus;
 }
 
 // ── Phase 1: Smart Constructive Phase ────────────────────
@@ -2553,25 +2731,12 @@ function applyMove(ctx, move) {
     }
 
     case "ERASE": {
-      ctx.room[move.row][move.col] = false;
-      // Update roomTiles
-      const key = move.row * ctx.gridW + move.col;
-      ctx.roomTileSet.delete(key);
-      const idx = ctx.roomTiles.findIndex(t => t.r === move.row && t.c === move.col);
-      if (idx >= 0) ctx.roomTiles.splice(idx, 1);
-      markStabilityDirty(ctx);
-      ctx._doorCandidateCache = undefined;
-      ctx._walkabilityValid = false;
+      removeRoomTile(ctx, move.row, move.col);
       return true;
     }
 
     case "ADD_ROOM": {
-      ctx.room[move.row][move.col] = true;
-      ctx.roomTiles.push({ r: move.row, c: move.col });
-      ctx.roomTileSet.add(move.row * ctx.gridW + move.col);
-      markStabilityDirty(ctx);
-      ctx._doorCandidateCache = undefined;
-      ctx._walkabilityValid = false;
+      restoreRoomTile(ctx, move.row, move.col);
       return true;
     }
 
@@ -2673,14 +2838,7 @@ function revertMove(ctx, move) {
     }
 
     case "ADD_ROOM": {
-      ctx.room[move.row][move.col] = false;
-      const key = move.row * ctx.gridW + move.col;
-      ctx.roomTileSet.delete(key);
-      const idx = ctx.roomTiles.findIndex(t => t.r === move.row && t.c === move.col);
-      if (idx >= 0) ctx.roomTiles.splice(idx, 1);
-      markStabilityDirty(ctx);
-      ctx._doorCandidateCache = undefined;
-      ctx._walkabilityValid = false;
+      removeRoomTile(ctx, move.row, move.col);
       break;
     }
   }
@@ -2784,7 +2942,6 @@ async function polishPhase(ctx) {
       if (dc !== 0) shifts.push([0, dc]);
       if (dr !== 0 && dc !== 0) shifts.push([dr, dc]);
 
-      let moved = false;
       for (const [sr, sc] of shifts) {
         clearOccupancy(ctx, pi);
         const origRow = p.row, origCol = p.col;
@@ -2807,7 +2964,6 @@ async function polishPhase(ctx) {
           const newScore = scoreLayoutSA(ctx);
           if (newScore >= currentScore && checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx)) {
             anyMoved = true;
-            moved = true;
             break; // keep this shift
           }
           clearOccupancy(ctx, pi);
@@ -2817,10 +2973,84 @@ async function polishPhase(ctx) {
         p.col = origCol;
         setOccupancy(ctx, pi);
       }
-      // moved is used to break out of shift loop only
-      void moved;
     }
     if (!anyMoved) break;
+  }
+
+  await yieldToUI();
+
+  // Sub-pass A3: Neatness rotation+shift — try rotating and shifting each piece to improve
+  // walkable-sharing. Uses dedicated neatness scoring with full weights. Primary stat must not decrease.
+  // Runs multiple rounds since rotating one piece may enable better orientations for neighbors.
+  {
+    const A3_SHIFTS = [[0,0],[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
+    for (let round = 0; round < 3; round++) {
+      let anyChanged = false;
+      const preStats = getStats(ctx);
+      const prePrimary = preStats[ctx.primaryStatIdx] ?? 0;
+      const preEff = ctx.effIdx >= 0 ? (preStats[ctx.effIdx] ?? 0) : -1;
+
+      for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
+        const p = ctx.placements[pi];
+        const group = fs.groups[p.groupIdx];
+        const rots = getAllowedRotations(group);
+
+        const origRot = p.rotation, origRow = p.row, origCol = p.col;
+        const currentNeatness = computeLocalNeatness(ctx, pi);
+        let bestRot = origRot, bestRow = origRow, bestCol = origCol;
+        let bestNeatness = currentNeatness;
+
+        clearOccupancy(ctx, pi);
+
+        for (const rot of rots) {
+          for (const [sr, sc] of A3_SHIFTS) {
+            if (rot === origRot && sr === 0 && sc === 0) continue;
+            p.rotation = rot;
+            p.row = origRow + sr;
+            p.col = origCol + sc;
+
+            const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, rot);
+            let fits = true;
+            for (let r = 0; r < tiles.length && fits; r++) {
+              for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+                if (tiles[r][c] === null) continue;
+                const gr = p.row + r, gc = p.col + c;
+                if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
+                else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+              }
+            }
+
+            if (fits) {
+              setOccupancy(ctx, pi);
+              const postStats = getStats(ctx);
+              const postPrimary = postStats[ctx.primaryStatIdx] ?? 0;
+              const postEff = ctx.effIdx >= 0 ? (postStats[ctx.effIdx] ?? 0) : -1;
+              if (postPrimary >= prePrimary && postEff >= preEff
+                  && checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx)) {
+                const neatness = computeLocalNeatness(ctx, pi);
+                if (neatness > bestNeatness) {
+                  bestRot = rot;
+                  bestRow = p.row;
+                  bestCol = p.col;
+                  bestNeatness = neatness;
+                }
+              }
+              clearOccupancy(ctx, pi);
+            }
+          }
+        }
+
+        // Apply best configuration
+        p.rotation = bestRot;
+        p.row = bestRow;
+        p.col = bestCol;
+        setOccupancy(ctx, pi);
+        if (bestRot !== origRot || bestRow !== origRow || bestCol !== origCol) {
+          anyChanged = true;
+        }
+      }
+      if (!anyChanged) break;
+    }
   }
 
   await yieldToUI();
