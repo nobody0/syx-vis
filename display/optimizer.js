@@ -1,9 +1,8 @@
-// Room Planner Auto-Optimizer — simulated annealing placement with constraint checking
+// Room Planner Auto-Optimizer — strip-based deterministic placement + lightweight SA polish
 import { AVAIL_BLOCKING, getRotatedTiles, getAllowedRotations, DIRS } from "./planner-core.js";
 
 const DIRS8 = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
 const SUPPORT_RADIUS = 4;
-const DEBUG_OPTIMIZER = false;
 
 // ── Efficient BFS queue (pointer-based, avoids O(n) Array.shift) ────
 function createBFSQueue(capacity) {
@@ -17,7 +16,7 @@ function createBFSQueue(capacity) {
   };
 }
 
-/** B1: Stamp-based visited — O(1) reset by incrementing stamp instead of clearing array. */
+/** Stamp-based visited — O(1) reset by incrementing stamp. */
 function freshVisited(ctx) {
   ctx.visitedStamp++;
   if (ctx.visitedStamp === 0) { ctx.visitedBuf.fill(0); ctx.visitedStamp = 1; }
@@ -27,7 +26,6 @@ function visitedHas(v, r, c) { return v.buf[r * v.w + c] === v.stamp; }
 function visitedSet(v, r, c) { v.buf[r * v.w + c] = v.stamp; }
 
 // ── Seeded PRNG (mulberry32) ─────────────────────────────
-
 function createRNG(seed) {
   let s = seed | 0;
   return function() {
@@ -40,16 +38,12 @@ function createRNG(seed) {
 
 function hashSeed(str) {
   let h = 0;
-  for (let i = 0; i < str.length; i++) {
-    h = ((h << 5) - h + str.charCodeAt(i)) | 0;
-  }
+  for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) | 0;
   return h;
 }
 
-// Pre-allocated buffer for tileSupport (replaces per-call Set allocation)
+// ── Support rays (DDA) ───────────────────────────────────
 const _tileSupportBuf = new Int32Array(128);
-
-// Pre-compute stability rays using DDA matching game's TileRayTracer.java
 const SUPPORT_RAYS = [];
 {
   const has = Array.from({ length: SUPPORT_RADIUS * 2 + 1 }, () => new Uint8Array(SUPPORT_RADIUS * 2 + 1));
@@ -89,15 +83,61 @@ const SUPPORT_RAYS = [];
   }
 }
 
-/** E1: Debug invariant check — rebuild state from scratch and compare with live state. */
-function debugValidateState(ctx) {
-  if (!DEBUG_OPTIMIZER) return;
+function tileSupport(room, gridW, gridH, r, c) {
+  let checkedLen = 0;
+  let support = 0;
+  for (const ray of SUPPORT_RAYS) {
+    for (let i = 0; i < ray.length; i++) {
+      const tr = r + ray[i].dy, tc = c + ray[i].dx;
+      if (tr < 0 || tr >= gridH || tc < 0 || tc >= gridW) break;
+      if (!room[tr][tc]) {
+        const key = tr * gridW + tc;
+        let found = false;
+        for (let j = 0; j < checkedLen; j++) {
+          if (_tileSupportBuf[j] === key) { found = true; break; }
+        }
+        if (!found) {
+          _tileSupportBuf[checkedLen++] = key;
+          support += Math.max(0, (3.5 - i) / 3.5);
+        }
+        break;
+      }
+    }
+  }
+  return support;
+}
+
+function countUnstableTiles(ctx) {
+  if (!ctx.furnitureSet.mustBeIndoors) return 0;
+  const { gridW, gridH, room } = ctx;
+  let count = 0;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c] && tileSupport(room, gridW, gridH, r, c) < 1.0) count++;
+  return count;
+}
+
+// ── Tile cache ───────────────────────────────────────────
+function getCachedTiles(ctx, groupIdx, itemIdx, rotation) {
+  const key = `${groupIdx}_${itemIdx}_${rotation}`;
+  let cached = ctx.tileCache.get(key);
+  if (!cached) {
+    const item = ctx.furnitureSet.groups[groupIdx]?.items[itemIdx];
+    if (!item) return [];
+    cached = getRotatedTiles(item, rotation);
+    ctx.tileCache.set(key, cached);
+  }
+  return cached;
+}
+
+// ── Occupancy grid ───────────────────────────────────────
+function buildOccupancyGrid(ctx) {
   const { gridW, gridH, placements, furnitureSet: fs } = ctx;
-  const refOcc = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
-  const refBc = Array.from({ length: gridH }, () => new Int8Array(gridW));
-  const refGg = Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1));
-  const refMrg = new Int8Array(gridW * gridH);
-  let refOccCount = 0;
+  const grid = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
+  const bc = Array.from({ length: gridH }, () => new Int8Array(gridW));
+  const gg = Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1));
+  const mrg = new Int8Array(gridW * gridH);
+  let occCount = 0;
   for (let pi = 0; pi < placements.length; pi++) {
     const p = placements[pi];
     const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
@@ -107,245 +147,106 @@ function debugValidateState(ctx) {
         if (tileKey === null) continue;
         const gr = p.row + r, gc = p.col + c;
         if (gr >= 0 && gr < gridH && gc >= 0 && gc < gridW) {
-          if (refOcc[gr][gc] < 0) refOccCount++;
-          refOcc[gr][gc] = pi;
-          refGg[gr][gc] = p.groupIdx;
+          if (grid[gr][gc] < 0) occCount++;
+          grid[gr][gc] = pi;
+          gg[gr][gc] = p.groupIdx;
           const tt = fs.tileTypes[tileKey];
-          if (tt && AVAIL_BLOCKING.has(tt.availability)) refBc[gr][gc]++;
-          if (tt?.mustBeReachable) refMrg[gr * gridW + gc] = 1;
+          if (tt && AVAIL_BLOCKING.has(tt.availability)) bc[gr][gc]++;
+          if (tt?.mustBeReachable) mrg[gr * gridW + gc] = 1;
         }
       }
     }
   }
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (ctx.occupancy[r][c] !== refOcc[r][c])
-        console.error(`[DBG] occupancy mismatch at ${r},${c}: live=${ctx.occupancy[r][c]} ref=${refOcc[r][c]}`);
-      if (ctx.blockerCount[r][c] !== refBc[r][c])
-        console.error(`[DBG] blockerCount mismatch at ${r},${c}: live=${ctx.blockerCount[r][c]} ref=${refBc[r][c]}`);
-      if (ctx.groupGrid[r][c] !== refGg[r][c])
-        console.error(`[DBG] groupGrid mismatch at ${r},${c}: live=${ctx.groupGrid[r][c]} ref=${refGg[r][c]}`);
-      if (ctx.mustReachGrid[r * gridW + c] !== refMrg[r * gridW + c])
-        console.error(`[DBG] mustReachGrid mismatch at ${r},${c}: live=${ctx.mustReachGrid[r * gridW + c]} ref=${refMrg[r * gridW + c]}`);
-    }
-  }
-  if (ctx.occupiedCount !== refOccCount)
-    console.error(`[DBG] occupiedCount mismatch: live=${ctx.occupiedCount} ref=${refOccCount}`);
-  let rtCount = 0;
-  for (let r = 0; r < gridH; r++)
-    for (let c = 0; c < gridW; c++)
-      if (ctx.room[r][c]) {
-        rtCount++;
-        if (!ctx.roomTileSet.has(r * gridW + c))
-          console.error(`[DBG] roomTileSet missing tile ${r},${c}`);
-      }
-  if (ctx.roomTiles.length !== rtCount)
-    console.error(`[DBG] roomTiles.length=${ctx.roomTiles.length} vs actual=${rtCount}`);
+  ctx.blockerCount = bc;
+  ctx.groupGrid = gg;
+  ctx.mustReachGrid = mrg;
+  ctx.occupiedCount = occCount;
+  ctx.statsDirty = true;
+  ctx.stabilityDirty = true;
+  ctx.mustReachDirty = true;
+  ctx._walkabilityValid = false;
+  return grid;
 }
 
-/**
- * Run the optimizer on the given room state.
- * @param {{
- *   building: import('../types.js').Building,
- *   furnitureSet: import('../types.js').FurnitureSet,
- *   gridW: number, gridH: number,
- *   room: boolean[][], placements: Array<{groupIdx:number, itemIdx:number, rotation:number, row:number, col:number}>,
- *   doors: Set<string>
- * }} input
- * @returns {Promise<{room: boolean[][], placements: Array<{groupIdx:number, itemIdx:number, rotation:number, row:number, col:number}>, doors: Set<string>}>}
- */
-export async function runOptimizer(input) {
-  const ctx = createContext(input);
-  if (!ctx) return input;
-
-  // Phase 0: Analysis & precomputation
-  analyzePhase(ctx);
-
-  // Phase 0-: Trim dead-end tendrils before SA
-  preCleanRoom(ctx);
-
-  // Phase 0.5: Pre-place support pillars (before any furniture)
-  await prePlacePillars(ctx);
-
-  // Save initial state (post-pillar) for multi-restart
-  const initialSnapshot = takeSnapshot(ctx);
-
-  // Multi-restart: run constructive+SA+polish 3 times, keep best
-  // Restart 0: standard constructive
-  // Restart 1: diversity (skip every 4th hero)
-  // Restart 2: neatness-aware constructive (H4/H5 facing heuristics)
-  let bestResult = null;
-  let bestResultScore = -Infinity;
-
-  for (let restart = 0; restart < 3; restart++) {
-    if (restart > 0) {
-      restoreSnapshot(ctx, initialSnapshot);
-      ctx.rng = createRNG(ctx.baseSeed + restart);
-    }
-
-    // Phase 1: Smart constructive phase (hero-first)
-    const skipInterval = restart === 1 ? 4 : 0;
-    const isNeatnessRestart = restart === 2;
-    ctx.useNeatnessPlacement = isNeatnessRestart;
-    ctx.useNeatnessSA = isNeatnessRestart;
-    await constructivePhase(ctx, skipInterval);
-    ctx.useNeatnessPlacement = false;
-    ctx.constructiveSnapshot = takeSnapshot(ctx);
-
-    // Phase 2: Simulated annealing
-    await simulatedAnnealing(ctx);
-    ctx.useNeatnessSA = false;
-
-    // Phase 2.5: Post-SA polish
-    await polishPhase(ctx);
-
-    const score = scoreLayoutSA(ctx);
-    if (score > bestResultScore) {
-      bestResultScore = score;
-      bestResult = takeSnapshot(ctx);
+function setOccupancy(ctx, pi) {
+  const p = ctx.placements[pi];
+  const fs = ctx.furnitureSet;
+  const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+  let overlap = false;
+  for (let r = 0; r < tiles.length; r++) {
+    for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
+      const tileKey = tiles[r][c];
+      if (tileKey === null) continue;
+      const gr = p.row + r, gc = p.col + c;
+      if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW) { overlap = true; continue; }
+      if (!ctx.room[gr][gc]) { overlap = true; continue; }
+      if (ctx.occupancy[gr][gc] >= 0 && ctx.occupancy[gr][gc] !== pi) overlap = true;
+      if (ctx.occupancy[gr][gc] < 0) ctx.occupiedCount++;
+      ctx.occupancy[gr][gc] = pi;
+      ctx.groupGrid[gr][gc] = p.groupIdx;
+      const tt = fs.tileTypes[tileKey];
+      if (tt && AVAIL_BLOCKING.has(tt.availability)) ctx.blockerCount[gr][gc]++;
+      if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 1;
     }
   }
-
-  // Restore the best result
-  restoreSnapshot(ctx, bestResult);
-  ctx.constructiveSnapshot = bestResult; // for validation fallback
-
-  // Phase 3: Room trimming (run once on winner)
-  await trimPhase(ctx);
-
-  // Phase 3c: Micro gap-fill pass
-  await microGapFill(ctx);
-
-  // Phase 4: Door optimization
-  doorPhase(ctx);
-
-  // Phase 5: Final validation
-  if (!validateFinal(ctx)) {
-    restoreSnapshot(ctx, ctx.constructiveSnapshot);
-  }
-
-  return { room: ctx.room, placements: ctx.placements, doors: ctx.doors };
+  ctx.statsDirty = true;
+  ctx.mustReachDirty = true;
+  ctx._walkabilityValid = false;
+  return !overlap;
 }
 
-// ── Context ──────────────────────────────────────────────
-
-function createContext(input) {
-  const { building, furnitureSet, gridW, gridH, room, placements, doors } = input;
-  if (!building || !furnitureSet) return null;
-
-  let roomCount = 0;
-  for (let r = 0; r < gridH; r++)
-    for (let c = 0; c < gridW; c++)
-      if (room[r][c]) roomCount++;
-  if (roomCount === 0) return null;
-
-  const clonedRoom = room.map(row => [...row]);
-  const clonedPlacements = placements.map(p => ({ ...p }));
-  const clonedDoors = new Set(doors);
-  const lockedCount = clonedPlacements.length;
-  const primaryStatIdx = findPrimaryStatIndex(furnitureSet, building);
-
-  // Detect relative stat indices that have at least one contributing group.
-  // Skip stats where no group provides positive contribution (e.g. employeesRelative
-  // with all-zero item stats) — penalizing an unsatisfiable stat would discourage
-  // placing primary items.
-  const relativeIndices = [];
-  if (furnitureSet.stats && building.items) {
-    for (let i = 0; i < furnitureSet.stats.length; i++) {
-      const s = furnitureSet.stats[i];
-      if (s.type === "relative" || s.type === "employeesRelative") {
-        let hasContributor = false;
-        for (const bItem of building.items) {
-          if (bItem?.stats && (bItem.stats[i] ?? 0) > 0) {
-            hasContributor = true;
-            break;
-          }
+function clearOccupancy(ctx, pi) {
+  const p = ctx.placements[pi];
+  const fs = ctx.furnitureSet;
+  const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+  for (let r = 0; r < tiles.length; r++) {
+    for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
+      const tileKey = tiles[r][c];
+      if (tileKey === null) continue;
+      const gr = p.row + r, gc = p.col + c;
+      if (gr >= 0 && gr < ctx.gridH && gc >= 0 && gc < ctx.gridW) {
+        if (ctx.occupancy[gr][gc] === pi) {
+          ctx.occupancy[gr][gc] = -1;
+          ctx.groupGrid[gr][gc] = -1;
+          ctx.occupiedCount--;
+          const tt = fs.tileTypes[tileKey];
+          if (tt && AVAIL_BLOCKING.has(tt.availability)) ctx.blockerCount[gr][gc]--;
+          if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 0;
         }
-        if (hasContributor) relativeIndices.push({ statIdx: i });
       }
     }
   }
-  const relIdxSet = new Set(relativeIndices.map(rel => rel.statIdx));
-
-  const baseSeed = hashSeed(`${building.id}_${gridW}_${gridH}_${roomCount}`);
-
-  const ctx = {
-    building,
-    furnitureSet,
-    gridW,
-    gridH,
-    room: clonedRoom,
-    placements: clonedPlacements,
-    doors: clonedDoors,
-    lockedCount,
-    primaryStatIdx,
-    relativeIndices,
-    relIdxSet,
-    occupancy: null,
-    // Seeded PRNG
-    rng: createRNG(baseSeed),
-    baseSeed,
-    // New fields populated in analyzePhase
-    tileCache: new Map(),
-    groupInfo: [],
-    empIdx: -1,
-    effIdx: -1,
-    roomTiles: [],
-    roomTileSet: new Set(), // Phase 1e: O(1) add/delete for room tiles
-    bestSnapshot: null,
-    constructiveSnapshot: null,
-    // Phase 1a: Reusable BFS queue
-    bfsQueue: createBFSQueue(gridW * gridH),
-    // Phase 1b: Incremental blocker tracking
-    blockerCount: Array.from({ length: gridH }, () => new Int8Array(gridW)),
-    // Phase 1c: Incremental stability tracking
-    unstableTileCount: 0,
-    stabilityDirty: true, // force initial computation
-    // Phase 1d: Incremental stats, group counts, occupied count
-    currentStats: null,
-    statsDirty: true,
-    groupCounts: null,
-    occupiedCount: 0,
-    // Incremental group-identity grid for type-aware alignment scoring
-    groupGrid: Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1)),
-    // H1/H2: mustBeReachable grid for walkable-sharing and blocker-packing heuristics
-    mustReachGrid: new Int8Array(gridW * gridH),
-    // B1: Stamp-based visited buffer (shared across BFS functions)
-    visitedBuf: new Uint32Array(gridW * gridH),
-    visitedStamp: 0,
-    // Stamp-based blocked buffer (for wouldDisconnectRoomOpt)
-    blockedBuf: new Uint32Array(gridW * gridH),
-    blockedStamp: 0,
-    // B4: mustReach cache
-    mustReachCache: null,
-    mustReachDirty: true,
-    // Walkability cache — valid until next state mutation
-    _walkabilityValid: false,
-  };
-
-  ctx.occupancy = buildOccupancyGrid(ctx);
-  return ctx;
+  ctx.statsDirty = true;
+  ctx.mustReachDirty = true;
+  ctx._walkabilityValid = false;
 }
 
-// ── Primary stat detection ───────────────────────────────
-
-function findPrimaryStatIndex(fs, _building) {
-  if (!fs.stats || fs.stats.length === 0) return 0;
-  let servicesIdx = -1, employeesIdx = -1, customIdx = -1;
-  for (let i = 0; i < fs.stats.length; i++) {
-    const s = fs.stats[i];
-    if (s.type === "services" && servicesIdx < 0) servicesIdx = i;
-    if (s.type === "employees" && employeesIdx < 0) employeesIdx = i;
-    if (s.type === "custom" && (s.name === "workers" || s.name === "men") && customIdx < 0) customIdx = i;
+// ── Stats ────────────────────────────────────────────────
+function computeStats(ctx) {
+  const { furnitureSet: fs, building: bld, placements } = ctx;
+  if (!fs.stats || !bld.items) return new Array(fs.stats?.length ?? 0).fill(0);
+  const totals = new Array(fs.stats.length).fill(0);
+  for (const p of placements) {
+    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
+    if (!item) continue;
+    const bItem = bld.items[p.groupIdx];
+    if (!bItem || !bItem.stats) continue;
+    const mult = item.multiplierStats ?? item.multiplier;
+    for (let s = 0; s < bItem.stats.length && s < totals.length; s++)
+      totals[s] += bItem.stats[s] * mult;
   }
-  if (servicesIdx >= 0) return servicesIdx;
-  if (employeesIdx >= 0) return employeesIdx;
-  if (customIdx >= 0) return customIdx;
-  return 0;
+  return totals;
+}
+
+function getStats(ctx) {
+  if (ctx.statsDirty || !ctx.currentStats) {
+    ctx.currentStats = computeStats(ctx);
+    ctx.statsDirty = false;
+  }
+  return ctx.currentStats;
 }
 
 // ── Snapshot helpers ─────────────────────────────────────
-
 function takeSnapshot(ctx) {
   return {
     placements: ctx.placements.map(p => ({ ...p })),
@@ -372,28 +273,25 @@ function rebuildRoomTiles(ctx) {
         ctx.roomTiles.push({ r, c });
         ctx.roomTileSet.add(r * ctx.gridW + c);
       }
-  // Rebuild group counts
   rebuildGroupCounts(ctx);
 }
 
-/** Remove a single room tile and update room, roomTileSet, roomTiles. */
 function removeRoomTile(ctx, r, c) {
   ctx.room[r][c] = false;
   const key = r * ctx.gridW + c;
   ctx.roomTileSet.delete(key);
   const idx = ctx.roomTiles.findIndex(t => t.r === r && t.c === c);
   if (idx >= 0) ctx.roomTiles.splice(idx, 1);
-  markStabilityDirty(ctx);
+  ctx.stabilityDirty = true;
   ctx._doorCandidateCache = undefined;
   ctx._walkabilityValid = false;
 }
 
-/** Restore a room tile and update room, roomTileSet, roomTiles. */
 function restoreRoomTile(ctx, r, c) {
   ctx.room[r][c] = true;
   ctx.roomTiles.push({ r, c });
   ctx.roomTileSet.add(r * ctx.gridW + c);
-  markStabilityDirty(ctx);
+  ctx.stabilityDirty = true;
   ctx._doorCandidateCache = undefined;
   ctx._walkabilityValid = false;
 }
@@ -401,395 +299,18 @@ function restoreRoomTile(ctx, r, c) {
 function rebuildGroupCounts(ctx) {
   const numGroups = ctx.furnitureSet.groups.length;
   ctx.groupCounts = new Int16Array(numGroups);
-  for (const p of ctx.placements) {
-    if (p.groupIdx >= 0 && p.groupIdx < numGroups) {
-      ctx.groupCounts[p.groupIdx]++;
-    }
-  }
+  for (const p of ctx.placements)
+    if (p.groupIdx >= 0 && p.groupIdx < numGroups) ctx.groupCounts[p.groupIdx]++;
 }
 
-// ── Occupancy grid ───────────────────────────────────────
-
-function buildOccupancyGrid(ctx) {
-  const { gridW, gridH, placements, furnitureSet: fs } = ctx;
-  const grid = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
-  // Reset blocker count, occupied count, group grid, and mustReachGrid
-  const bc = Array.from({ length: gridH }, () => new Int8Array(gridW));
-  const gg = Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1));
-  const mrg = new Int8Array(gridW * gridH);
-  let occCount = 0;
-  for (let pi = 0; pi < placements.length; pi++) {
-    const p = placements[pi];
-    const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-    for (let r = 0; r < tiles.length; r++) {
-      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-        const tileKey = tiles[r][c];
-        if (tileKey === null) continue;
-        const gr = p.row + r, gc = p.col + c;
-        if (gr >= 0 && gr < gridH && gc >= 0 && gc < gridW) {
-          if (grid[gr][gc] < 0) occCount++;
-          grid[gr][gc] = pi;
-          gg[gr][gc] = p.groupIdx;
-          const tt = fs.tileTypes[tileKey];
-          if (tt && AVAIL_BLOCKING.has(tt.availability)) {
-            bc[gr][gc]++;
-          }
-          if (tt?.mustBeReachable) {
-            mrg[gr * gridW + gc] = 1;
-          }
-        }
-      }
-    }
-  }
-  ctx.blockerCount = bc;
-  ctx.groupGrid = gg;
-  ctx.mustReachGrid = mrg;
-  ctx.occupiedCount = occCount;
-  ctx.statsDirty = true;
-  ctx.stabilityDirty = true;
-  ctx.mustReachDirty = true;
-  ctx._walkabilityValid = false;
-  return grid;
+function countGroupPlacements(ctx, groupIdx) {
+  if (ctx.groupCounts) return ctx.groupCounts[groupIdx] ?? 0;
+  let count = 0;
+  for (const p of ctx.placements) if (p.groupIdx === groupIdx) count++;
+  return count;
 }
 
-/** Set occupancy for a specific placement index. Returns false if overlap detected. */
-function setOccupancy(ctx, pi) {
-  const p = ctx.placements[pi];
-  const fs = ctx.furnitureSet;
-  const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-  let overlap = false;
-  for (let r = 0; r < tiles.length; r++) {
-    for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-      const tileKey = tiles[r][c];
-      if (tileKey === null) continue;
-      const gr = p.row + r, gc = p.col + c;
-      if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW) { overlap = true; continue; }
-      if (!ctx.room[gr][gc]) { overlap = true; continue; }
-      if (ctx.occupancy[gr][gc] >= 0 && ctx.occupancy[gr][gc] !== pi) overlap = true;
-      if (ctx.occupancy[gr][gc] < 0) ctx.occupiedCount++;
-      ctx.occupancy[gr][gc] = pi;
-      ctx.groupGrid[gr][gc] = p.groupIdx;
-      // Phase 1b: Update blocker tracking
-      const tt = fs.tileTypes[tileKey];
-      if (tt && AVAIL_BLOCKING.has(tt.availability)) {
-        ctx.blockerCount[gr][gc]++;
-      }
-      // H1/H2: Update mustReachGrid
-      if (tt?.mustBeReachable) {
-        ctx.mustReachGrid[gr * ctx.gridW + gc] = 1;
-      }
-    }
-  }
-  ctx.statsDirty = true;
-  ctx.mustReachDirty = true;
-  ctx._walkabilityValid = false;
-  return !overlap;
-}
-
-/** Clear occupancy for a specific placement index.
- *  Only decrements blockerCount when occupancy actually matches,
- *  preventing desync from mismatched clear/set pairs. */
-function clearOccupancy(ctx, pi) {
-  const p = ctx.placements[pi];
-  const fs = ctx.furnitureSet;
-  const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-  for (let r = 0; r < tiles.length; r++) {
-    for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-      const tileKey = tiles[r][c];
-      if (tileKey === null) continue;
-      const gr = p.row + r, gc = p.col + c;
-      if (gr >= 0 && gr < ctx.gridH && gc >= 0 && gc < ctx.gridW) {
-        if (ctx.occupancy[gr][gc] === pi) {
-          ctx.occupancy[gr][gc] = -1;
-          ctx.groupGrid[gr][gc] = -1;
-          ctx.occupiedCount--;
-          // Only decrement blocker when this piece actually owns the tile
-          const tt = fs.tileTypes[tileKey];
-          if (tt && AVAIL_BLOCKING.has(tt.availability)) {
-            ctx.blockerCount[gr][gc]--;
-          }
-          // H1/H2: Clear mustReachGrid
-          if (tt?.mustBeReachable) {
-            ctx.mustReachGrid[gr * ctx.gridW + gc] = 0;
-          }
-        }
-      }
-    }
-  }
-  ctx.statsDirty = true;
-  ctx.mustReachDirty = true;
-  ctx._walkabilityValid = false;
-}
-
-// ── Tile cache ───────────────────────────────────────────
-
-function getCachedTiles(ctx, groupIdx, itemIdx, rotation) {
-  const key = `${groupIdx}_${itemIdx}_${rotation}`;
-  let cached = ctx.tileCache.get(key);
-  if (!cached) {
-    const item = ctx.furnitureSet.groups[groupIdx]?.items[itemIdx];
-    if (!item) return [];
-    cached = getRotatedTiles(item, rotation);
-    ctx.tileCache.set(key, cached);
-  }
-  return cached;
-}
-
-// ── Stat computation ─────────────────────────────────────
-
-function computeStats(ctx) {
-  const { furnitureSet: fs, building: bld, placements } = ctx;
-  if (!fs.stats || !bld.items) return new Array(fs.stats?.length ?? 0).fill(0);
-  const totals = new Array(fs.stats.length).fill(0);
-  for (const p of placements) {
-    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
-    if (!item) continue;
-    const bItem = bld.items[p.groupIdx];
-    if (!bItem || !bItem.stats) continue;
-    const mult = item.multiplierStats ?? item.multiplier;
-    for (let s = 0; s < bItem.stats.length && s < totals.length; s++) {
-      totals[s] += bItem.stats[s] * mult;
-    }
-  }
-  return totals;
-}
-
-/** B3: Cached stats — recomputes only when dirty. */
-function getStats(ctx) {
-  if (ctx.statsDirty || !ctx.currentStats) {
-    ctx.currentStats = computeStats(ctx);
-    ctx.statsDirty = false;
-  }
-  return ctx.currentStats;
-}
-
-// ── Score function ───────────────────────────────────────
-
-function scoreLayoutSA(ctx) {
-  const stats = getStats(ctx);
-  const primary = stats[ctx.primaryStatIdx] ?? 0;
-
-  // Secondary stats (excluding efficiency and relative which are handled separately)
-  const relIdxSet = ctx.relIdxSet;
-  let secondary = 0;
-  for (let i = 0; i < stats.length; i++) {
-    if (i !== ctx.primaryStatIdx && i !== ctx.effIdx && !relIdxSet.has(i)) secondary += stats[i];
-  }
-
-  // Total build cost
-  let totalCost = 0;
-  const { building: bld, furnitureSet: fs, placements } = ctx;
-  for (const p of placements) {
-    const bItem = bld.items?.[p.groupIdx];
-    if (!bItem?.costs) continue;
-    const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
-    if (!item) continue;
-    for (const cost of bItem.costs) {
-      totalCost += cost.amount * item.multiplier;
-    }
-  }
-
-  // Efficiency: huge bonus up to employee count, worthless beyond
-  let effBonus = 0;
-  let effPenalty = 0;
-  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-    const emp = stats[ctx.empIdx] ?? 0;
-    const eff = stats[ctx.effIdx] ?? 0;
-    effBonus = Math.min(eff, emp) * 10000;
-    if (eff < emp) {
-      const deficit = emp - eff;
-      effPenalty = deficit * deficit * 1000;
-    }
-  }
-
-  // Relative stats: bonus for coverage, quadratic penalty for deficit
-  let relBonus = 0, relPenalty = 0;
-  for (const rel of ctx.relativeIndices) {
-    const primaryVal = stats[ctx.primaryStatIdx] ?? 0;
-    const relVal = stats[rel.statIdx] ?? 0;
-    relBonus += Math.min(relVal, primaryVal) * 500;
-    if (relVal < primaryVal) {
-      const deficit = primaryVal - relVal;
-      relPenalty += deficit * deficit * 200;
-    }
-  }
-
-  // Stability penalty (heavy — each unstable tile is very bad)
-  const unstableCount = getCachedUnstableCount(ctx);
-  const stabilityPenalty = unstableCount * 500;
-
-  // Room size penalty: progressive — tiles beyond needed get penalized harder (Phase 3b)
-  const roomTileCount = ctx.roomTiles.length;
-  const occupied = ctx.occupiedCount;
-  const minNeeded = occupied + Math.ceil(occupied * 0.3);
-  const excess = Math.max(0, roomTileCount - minNeeded);
-  const roomPenalty = minNeeded * 10 + excess * 25;
-
-  // Packing density bonus: increased weight (Phase 2f)
-  const packingBonus = (occupied / Math.max(1, roomTileCount)) * 200;
-
-  // Phase 2d: Alignment bonus — reward contiguous occupied runs along rows/cols
-  let alignBonus = 0;
-  const { gridW, gridH } = ctx;
-  // Horizontal runs
-  for (let r = 0; r < gridH; r++) {
-    let runLen = 0;
-    for (let c = 0; c < gridW; c++) {
-      if (ctx.room[r][c] && ctx.occupancy[r][c] >= 0) {
-        runLen++;
-      } else {
-        if (runLen >= 2) alignBonus += runLen * 0.5;
-        runLen = 0;
-      }
-    }
-    if (runLen >= 2) alignBonus += runLen * 0.5;
-  }
-  // Vertical runs
-  for (let c = 0; c < gridW; c++) {
-    let runLen = 0;
-    for (let r = 0; r < gridH; r++) {
-      if (ctx.room[r][c] && ctx.occupancy[r][c] >= 0) {
-        runLen++;
-      } else {
-        if (runLen >= 2) alignBonus += runLen * 0.5;
-        runLen = 0;
-      }
-    }
-    if (runLen >= 2) alignBonus += runLen * 0.5;
-  }
-
-  // Type-aware alignment bonus — reward runs of same groupIdx along rows/cols
-  let typeAlignBonus = 0;
-  // Horizontal runs
-  for (let r = 0; r < gridH; r++) {
-    let runLen = 0, runGroup = -1;
-    for (let c = 0; c < gridW; c++) {
-      const g = ctx.groupGrid[r][c];
-      if (g >= 0 && g === runGroup) {
-        runLen++;
-      } else {
-        if (runLen >= 2) typeAlignBonus += runLen * 0.3;
-        runLen = g >= 0 ? 1 : 0;
-        runGroup = g;
-      }
-    }
-    if (runLen >= 2) typeAlignBonus += runLen * 0.3;
-  }
-  // Vertical runs
-  for (let c = 0; c < gridW; c++) {
-    let runLen = 0, runGroup = -1;
-    for (let r = 0; r < gridH; r++) {
-      const g = ctx.groupGrid[r][c];
-      if (g >= 0 && g === runGroup) {
-        runLen++;
-      } else {
-        if (runLen >= 2) typeAlignBonus += runLen * 0.3;
-        runLen = g >= 0 ? 1 : 0;
-        runGroup = g;
-      }
-    }
-    if (runLen >= 2) typeAlignBonus += runLen * 0.3;
-  }
-
-  // Phase 2e: Walkway corridor bonus — reward straight runs of open tiles
-  let walkwayBonus = 0;
-  // Horizontal walkways
-  for (let r = 0; r < gridH; r++) {
-    let runLen = 0;
-    for (let c = 0; c < gridW; c++) {
-      if (ctx.room[r][c] && ctx.occupancy[r][c] < 0 && ctx.blockerCount[r][c] === 0) {
-        runLen++;
-      } else {
-        if (runLen >= 3) walkwayBonus += runLen;
-        runLen = 0;
-      }
-    }
-    if (runLen >= 3) walkwayBonus += runLen;
-  }
-  // Vertical walkways
-  for (let c = 0; c < gridW; c++) {
-    let runLen = 0;
-    for (let r = 0; r < gridH; r++) {
-      if (ctx.room[r][c] && ctx.occupancy[r][c] < 0 && ctx.blockerCount[r][c] === 0) {
-        runLen++;
-      } else {
-        if (runLen >= 3) walkwayBonus += runLen;
-        runLen = 0;
-      }
-    }
-    if (runLen >= 3) walkwayBonus += runLen;
-  }
-
-  // H1/H2/H3: Neatness bonuses — only computed during neatness restart (restart 2).
-  // Skipping the grid scan entirely on restarts 0/1 avoids ~gridW*gridH wasted iterations
-  // per scoring call (significant for large rooms like 40x40 Smithy).
-  let neatBonus = 0;
-  if (ctx.useNeatnessSA) {
-    let walkableSharingBonus = 0;
-    let blockerPackingBonus = 0;
-    let deadSpacePenalty = 0;
-
-    for (let r = 0; r < gridH; r++) {
-      for (let c = 0; c < gridW; c++) {
-        if (!ctx.room[r][c]) continue;
-
-        const isOccupied = ctx.occupancy[r][c] >= 0;
-        const isBlocked = ctx.blockerCount[r][c] > 0;
-        const isMustReach = ctx.mustReachGrid[r * gridW + c] === 1;
-
-        if (!isOccupied && !isBlocked) {
-          // H1: Walkable tile — count adjacent mustBeReachable tiles
-          let adjMR = 0;
-          for (const [dr, dc] of DIRS) {
-            const nr = r + dr, nc = c + dc;
-            if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
-                && ctx.mustReachGrid[nr * gridW + nc] === 1) {
-              adjMR++;
-            }
-          }
-          if (adjMR >= 2) walkableSharingBonus += adjMR * (adjMR - 1) / 2;
-
-          // H3: Dead space — 3+ blocked/wall neighbors, no adjacent mustReachable
-          if (adjMR === 0) {
-            let blockedNeighbors = 0;
-            for (const [dr, dc] of DIRS) {
-              const nr = r + dr, nc = c + dc;
-              if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) {
-                blockedNeighbors++;
-              } else if (ctx.blockerCount[nr][nc] > 0) {
-                blockedNeighbors++;
-              }
-            }
-            if (blockedNeighbors >= 3) deadSpacePenalty++;
-          }
-        } else if (isBlocked && !isMustReach) {
-          // H2: Blocking non-mustReachable tile — count adjacent blockers/walls
-          let packedNeighbors = 0;
-          for (const [dr, dc] of DIRS) {
-            const nr = r + dr, nc = c + dc;
-            if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) {
-              packedNeighbors++;
-            } else if (ctx.blockerCount[nr][nc] > 0) {
-              packedNeighbors++;
-            }
-          }
-          blockerPackingBonus += packedNeighbors;
-        }
-      }
-    }
-
-    neatBonus = walkableSharingBonus * 4 + blockerPackingBonus - deadSpacePenalty * 2;
-  }
-
-  return primary * 1000 + secondary + effBonus + relBonus + packingBonus
-         + alignBonus * 2 + typeAlignBonus * 2 + walkwayBonus * 0.5
-         + neatBonus
-         - totalCost * 0.001 - effPenalty - relPenalty
-         - stabilityPenalty - roomPenalty;
-}
-
-// ── Placement validation (optimizer-local) ───────────────
-
+// ── Placement validation ─────────────────────────────────
 function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
   const { furnitureSet: fs, gridW, gridH, room, occupancy } = ctx;
   const tiles = getCachedTiles(ctx, groupIdx, itemIdx, rotation);
@@ -809,24 +330,19 @@ function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
       if (occ >= 0 && occ !== skipPi) return false;
       proposedTiles.push({ gr, gc, tileKey });
       const tt = fs.tileTypes[tileKey];
-      if (tt && AVAIL_BLOCKING.has(tt.availability)) {
-        proposedBlockers.add(gr * gridW + gc);
-      }
+      if (tt && AVAIL_BLOCKING.has(tt.availability)) proposedBlockers.add(gr * gridW + gc);
     }
   }
 
-  // mustBeReachable check for proposed tiles
+  // mustBeReachable check
   for (const { gr, gc, tileKey } of proposedTiles) {
     const tt = fs.tileTypes[tileKey];
     if (!tt?.mustBeReachable) continue;
     let blockedCount = 0;
     for (const [dr, dc] of DIRS) {
       const nr = gr + dr, nc = gc + dc;
-      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !room[nr][nc]) {
-        blockedCount++;
-      } else if (isBlockerAtOpt(ctx, nr, nc, proposedBlockers, skipPi)) {
-        blockedCount++;
-      }
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !room[nr][nc]) blockedCount++;
+      else if (isBlockerAtOpt(ctx, nr, nc, proposedBlockers, skipPi)) blockedCount++;
     }
     if (blockedCount >= 4) return false;
   }
@@ -845,9 +361,7 @@ function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
     }
   }
 
-  // Furniture reachability: the piece as a whole must have at least one
-  // walkable (non-blocked) neighbor on its perimeter. Workers can walk on
-  // non-blocking occupied tiles, so only blockers prevent reachability.
+  // Piece perimeter reachability
   const proposedSet = new Set(proposedTiles.map(t => t.gr * gridW + t.gc));
   let hasWalkableNeighbor = false;
   for (const { gr, gc } of proposedTiles) {
@@ -856,7 +370,7 @@ function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
       const nr = gr + dr, nc = gc + dc;
       if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
       if (!room[nr][nc]) continue;
-      if (proposedSet.has(nr * gridW + nc)) continue; // part of this piece
+      if (proposedSet.has(nr * gridW + nc)) continue;
       if (isBlockerAtOpt(ctx, nr, nc, proposedBlockers, skipPi)) continue;
       hasWalkableNeighbor = true;
       break;
@@ -864,8 +378,7 @@ function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
   }
   if (!hasWalkableNeighbor) return false;
 
-  // Check that placing proposed blockers doesn't fully enclose adjacent existing pieces.
-  // Only blocking tiles can cause enclosure (non-blocking don't prevent pathfinding).
+  // Don't enclose adjacent pieces
   if (proposedBlockers.size > 0) {
     const checkedPieces = new Set();
     for (const { gr, gc, tileKey } of proposedTiles) {
@@ -877,7 +390,6 @@ function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
         const adjPi = occupancy[nr][nc];
         if (adjPi < 0 || adjPi === skipPi || checkedPieces.has(adjPi)) continue;
         checkedPieces.add(adjPi);
-        // Verify this adjacent piece still has at least one non-blocked neighbor
         if (!pieceHasWalkableNeighbor(ctx, adjPi, proposedBlockers, proposedSet, skipPi)) return false;
       }
     }
@@ -891,8 +403,6 @@ function canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
   return true;
 }
 
-/** Check if an existing placement still has at least one non-blocked neighbor,
- *  considering proposed blockers and proposed occupied tiles. */
 function pieceHasWalkableNeighbor(ctx, pi, proposedBlockers, proposedSet, skipPi) {
   const { gridW, gridH, room } = ctx;
   const p = ctx.placements[pi];
@@ -906,9 +416,9 @@ function pieceHasWalkableNeighbor(ctx, pi, proposedBlockers, proposedSet, skipPi
         const nr = gr + dr, nc = gc + dc;
         if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
         if (!room[nr][nc]) continue;
-        if (proposedSet.has(nr * gridW + nc)) continue; // part of the new piece
+        if (proposedSet.has(nr * gridW + nc)) continue;
         if (isBlockerAtOpt(ctx, nr, nc, proposedBlockers, skipPi)) continue;
-        return true; // found a walkable neighbor
+        return true;
       }
     }
   }
@@ -937,55 +447,42 @@ function wouldBeFullyBlockedOpt(ctx, r, c, proposedBlockers, skipPi) {
   let blockedCount = 0;
   for (const [dr, dc] of DIRS) {
     const nr = r + dr, nc = c + dc;
-    if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) {
-      blockedCount++;
-    } else if (isBlockerAtOpt(ctx, nr, nc, proposedBlockers, skipPi)) {
-      blockedCount++;
-    }
+    if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) blockedCount++;
+    else if (isBlockerAtOpt(ctx, nr, nc, proposedBlockers, skipPi)) blockedCount++;
   }
   return blockedCount >= 4;
 }
 
 function wouldDisconnectRoomOpt(ctx, proposedBlockers, skipPi) {
   const { gridW, gridH, room } = ctx;
-  // Build blocked view using stamp-based buffer (avoids 2D array allocation)
   ctx.blockedStamp++;
   if (ctx.blockedStamp === 0) { ctx.blockedBuf.fill(0); ctx.blockedStamp = 1; }
   const bStamp = ctx.blockedStamp;
   const bBuf = ctx.blockedBuf;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
       if (ctx.blockerCount[r][c] > 0) bBuf[r * gridW + c] = bStamp;
-    }
-  }
-  // Clear blockers from the skipped placement
   if (skipPi !== undefined && skipPi >= 0) {
     const sp = ctx.placements[skipPi];
     if (sp) {
       const stiles = getCachedTiles(ctx, sp.groupIdx, sp.itemIdx, sp.rotation);
-      for (let r = 0; r < stiles.length; r++) {
+      for (let r = 0; r < stiles.length; r++)
         for (let c = 0; c < (stiles[r]?.length ?? 0); c++) {
           if (stiles[r][c] === null) continue;
           const gr = sp.row + r, gc = sp.col + c;
           if (gr >= 0 && gr < gridH && gc >= 0 && gc < gridW) bBuf[gr * gridW + gc] = 0;
         }
-      }
     }
   }
-  // proposedBlockers keys are numeric (r * gridW + c)
-  for (const key of proposedBlockers) {
-    bBuf[key] = bStamp;
-  }
+  for (const key of proposedBlockers) bBuf[key] = bStamp;
 
   let totalOpen = 0, startR = -1, startC = -1;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
       if (room[r][c] && bBuf[r * gridW + c] !== bStamp) {
         totalOpen++;
         if (startR < 0) { startR = r; startC = c; }
       }
-    }
-  }
   if (totalOpen === 0) return false;
 
   const v = freshVisited(ctx);
@@ -994,7 +491,6 @@ function wouldDisconnectRoomOpt(ctx, proposedBlockers, skipPi) {
   q.push(startR, startC);
   visitedSet(v, startR, startC);
   let reached = 1;
-
   while (q.length > 0) {
     const [cr, cc] = q.shift();
     for (const [dr, dc] of DIRS) {
@@ -1010,11 +506,9 @@ function wouldDisconnectRoomOpt(ctx, proposedBlockers, skipPi) {
 }
 
 // ── Walkability check ────────────────────────────────────
-
 function checkWalkabilityOpt(ctx) {
   const { furnitureSet: fs, gridW, gridH, room, placements, blockerCount } = ctx;
 
-  // B4: Cache mustReach positions
   let mustReach;
   if (!ctx.mustReachDirty && ctx.mustReachCache) {
     mustReach = ctx.mustReachCache;
@@ -1022,7 +516,7 @@ function checkWalkabilityOpt(ctx) {
     mustReach = [];
     for (const p of placements) {
       const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-      for (let r = 0; r < tiles.length; r++) {
+      for (let r = 0; r < tiles.length; r++)
         for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
           const tileKey = tiles[r][c];
           if (tileKey === null) continue;
@@ -1031,7 +525,6 @@ function checkWalkabilityOpt(ctx) {
           const tt = fs.tileTypes[tileKey];
           if (tt?.mustBeReachable) mustReach.push({ row: gr, col: gc });
         }
-      }
     }
     ctx.mustReachCache = mustReach;
     ctx.mustReachDirty = false;
@@ -1042,19 +535,12 @@ function checkWalkabilityOpt(ctx) {
   q.reset();
   let totalOpen = 0;
   let seeded = false;
-
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
       if (room[r][c] && blockerCount[r][c] === 0) {
         totalOpen++;
-        if (!seeded) {
-          q.push(r, c);
-          visitedSet(v, r, c);
-          seeded = true;
-        }
+        if (!seeded) { q.push(r, c); visitedSet(v, r, c); seeded = true; }
       }
-    }
-  }
 
   let reached = seeded ? 1 : 0;
   while (q.length > 0) {
@@ -1074,31 +560,27 @@ function checkWalkabilityOpt(ctx) {
     for (const [dr, dc] of DIRS) {
       const nr = row + dr, nc = col + dc;
       if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && visitedHas(v, nr, nc)) {
-        reachable = true;
-        break;
+        reachable = true; break;
       }
     }
     if (!reachable) return false;
   }
 
-  // Every furniture piece must have at least one walkable neighbor on its perimeter.
-  // A fully enclosed piece can never be interacted with by workers.
+  // Every piece must have at least one walkable neighbor
   for (const p of placements) {
     const pTiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
     let pieceReachable = false;
-    for (let r = 0; r < pTiles.length && !pieceReachable; r++) {
+    for (let r = 0; r < pTiles.length && !pieceReachable; r++)
       for (let c = 0; c < (pTiles[r]?.length ?? 0) && !pieceReachable; c++) {
         if (pTiles[r][c] === null) continue;
         const gr = p.row + r, gc = p.col + c;
         for (const [dr, dc] of DIRS) {
           const nr = gr + dr, nc = gc + dc;
           if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && visitedHas(v, nr, nc)) {
-            pieceReachable = true;
-            break;
+            pieceReachable = true; break;
           }
         }
       }
-    }
     if (!pieceReachable) return false;
   }
 
@@ -1108,165 +590,22 @@ function checkWalkabilityOpt(ctx) {
 }
 
 // ── Stability check ──────────────────────────────────────
-
 function checkStabilityOpt(ctx) {
   if (!ctx.furnitureSet.mustBeIndoors) return true;
   const { gridW, gridH, room } = ctx;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (!room[r][c]) continue;
-      if (tileSupport(room, gridW, gridH, r, c) < 1.0) return false;
-    }
-  }
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c] && tileSupport(room, gridW, gridH, r, c) < 1.0) return false;
   return true;
 }
 
-/** Compute support score for a single tile. */
-function tileSupport(room, gridW, gridH, r, c) {
-  let checkedLen = 0;
-  let support = 0;
-  for (const ray of SUPPORT_RAYS) {
-    for (let i = 0; i < ray.length; i++) {
-      const tr = r + ray[i].dy, tc = c + ray[i].dx;
-      if (tr < 0 || tr >= gridH || tc < 0 || tc >= gridW) break;
-      if (!room[tr][tc]) {
-        const key = tr * gridW + tc;
-        let found = false;
-        for (let j = 0; j < checkedLen; j++) {
-          if (_tileSupportBuf[j] === key) { found = true; break; }
-        }
-        if (!found) {
-          _tileSupportBuf[checkedLen++] = key;
-          support += Math.max(0, (3.5 - i) / 3.5);
-        }
-        break;
-      }
-    }
-  }
-  return support;
-}
-
-/** Count unstable tiles (for scoring penalty). Returns 0 for outdoor buildings. */
-function countUnstableTiles(ctx) {
-  if (!ctx.furnitureSet.mustBeIndoors) return 0;
-  const { gridW, gridH, room } = ctx;
-  let count = 0;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (!room[r][c]) continue;
-      if (tileSupport(room, gridW, gridH, r, c) < 1.0) count++;
-    }
-  }
-  return count;
-}
-
-/** Get cached unstable tile count, recomputing only when dirty. */
-function getCachedUnstableCount(ctx) {
-  if (ctx.stabilityDirty) {
-    ctx.unstableTileCount = countUnstableTiles(ctx);
-    ctx.stabilityDirty = false;
-  }
-  return ctx.unstableTileCount;
-}
-
-/** Mark stability as dirty within SUPPORT_RADIUS+1 of changed tile.
- *  Since we cache only the total count, just mark dirty. */
-function markStabilityDirty(ctx) {
-  ctx.stabilityDirty = true;
-}
-
-// ── Isolation check ──────────────────────────────────────
-
-function computeIsolationOpt(ctx) {
-  if (!ctx.furnitureSet.mustBeIndoors) return 1;
-  const { gridW, gridH, room, doors } = ctx;
-  const walls = Array.from({ length: gridH }, () => Array(gridW).fill(false));
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (room[r][c]) continue;
-      let adjRoom = false;
-      for (const [dr, dc] of DIRS8) {
-        const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && room[nr][nc]) {
-          adjRoom = true; break;
-        }
-      }
-      if (adjRoom && !doors.has(`${r},${c}`)) walls[r][c] = true;
-    }
-  }
-
-  let edgeTiles = 0, total = 0, unwalled = 0;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (!room[r][c]) continue;
-      let isEdge = false;
-      for (const [dr, dc] of DIRS8) {
-        const nr = r + dr, nc = c + dc;
-        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !room[nr][nc]) {
-          isEdge = true; break;
-        }
-      }
-      if (!isEdge) continue;
-      edgeTiles++;
-      for (const [dr, dc] of DIRS8) {
-        const nr = r + dr, nc = c + dc;
-        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) {
-          total++; unwalled++;
-        } else if (!room[nr][nc]) {
-          total++;
-          if (!walls[nr][nc]) {
-            unwalled += doors.has(`${nr},${nc}`) ? 0.34 : 1;
-          }
-        }
-      }
-    }
-  }
-  if (total === 0) return 1;
-  const bonus = Math.ceil(edgeTiles / 10);
-  const raw = Math.min(1, Math.max(0, (total - unwalled + bonus) / total));
-  return Math.pow(raw, 1.5);
-}
-
-// ── Constraint checks ────────────────────────────────────
-
-function hasStorageTile(ctx) {
-  const { furnitureSet: fs, placements } = ctx;
-  for (const p of placements) {
-    const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-    for (let r = 0; r < tiles.length; r++) {
-      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-        const tileKey = tiles[r][c];
-        if (tileKey === null) continue;
-        const tt = fs.tileTypes[tileKey];
-        if (tt?.data === 2) return true;
-      }
-    }
-  }
-  return false;
-}
-
-function countGroupPlacements(ctx, groupIdx) {
-  if (ctx.groupCounts) return ctx.groupCounts[groupIdx] ?? 0;
-  let count = 0;
-  for (const p of ctx.placements) {
-    if (p.groupIdx === groupIdx) count++;
-  }
-  return count;
-}
-
 // ── Room connectivity ────────────────────────────────────
-
 function checkRoomConnectivity(ctx) {
   const { gridW, gridH, room } = ctx;
   let totalRoom = 0, startR = -1, startC = -1;
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (room[r][c]) {
-        totalRoom++;
-        if (startR < 0) { startR = r; startC = c; }
-      }
-    }
-  }
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c]) { totalRoom++; if (startR < 0) { startR = r; startC = c; } }
   if (totalRoom === 0) return true;
 
   const v = freshVisited(ctx);
@@ -1275,7 +614,6 @@ function checkRoomConnectivity(ctx) {
   q.push(startR, startC);
   visitedSet(v, startR, startC);
   let reached = 1;
-
   while (q.length > 0) {
     const [cr, cc] = q.shift();
     for (const [dr, dc] of DIRS) {
@@ -1290,116 +628,350 @@ function checkRoomConnectivity(ctx) {
   return reached >= totalRoom;
 }
 
-/** After an ERASE move disconnects the room, try to auto-clean the smaller fragment.
- *  Returns true if fragments were cleaned (move is safe), false if rejected.
- *  Stores cleaned tiles in move.autoCleanedTiles for revert. */
-function findAndCleanFragments(ctx, move) {
-  const { gridW, gridH, room } = ctx;
-  // BFS from first room tile to find the main component
-  let startR = -1, startC = -1;
-  for (let r = 0; r < gridH && startR < 0; r++)
-    for (let c = 0; c < gridW && startR < 0; c++)
-      if (room[r][c]) { startR = r; startC = c; }
-  if (startR < 0) return false;
-
-  const v = freshVisited(ctx);
-  const q = ctx.bfsQueue;
-  q.reset();
-  q.push(startR, startC);
-  visitedSet(v, startR, startC);
-  while (q.length > 0) {
-    const [cr, cc] = q.shift();
-    for (const [dr, dc] of DIRS) {
-      const nr = cr + dr, nc = cc + dc;
-      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
-      if (visitedHas(v, nr, nc) || !room[nr][nc]) continue;
-      visitedSet(v, nr, nc);
-      q.push(nr, nc);
-    }
+// ── Constraint helpers ───────────────────────────────────
+function hasStorageTile(ctx) {
+  const { furnitureSet: fs, placements } = ctx;
+  for (const p of placements) {
+    const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+    for (let r = 0; r < tiles.length; r++)
+      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
+        const tileKey = tiles[r][c];
+        if (tileKey === null) continue;
+        if (fs.tileTypes[tileKey]?.data === 2) return true;
+      }
   }
-
-  // Collect disconnected tiles
-  const disconnected = [];
-  for (let r = 0; r < gridH; r++)
-    for (let c = 0; c < gridW; c++)
-      if (room[r][c] && !visitedHas(v, r, c))
-        disconnected.push({ r, c });
-
-  if (disconnected.length === 0) return true; // already connected
-  if (disconnected.length > 3) return false; // too many to auto-clean
-
-  // Safety: none occupied, none are doors
-  for (const { r, c } of disconnected) {
-    if (ctx.occupancy[r][c] >= 0) return false;
-    if (ctx.doors.has(`${r},${c}`)) return false;
-  }
-
-  // Erase all disconnected tiles
-  move.autoCleanedTiles = [];
-  for (const { r, c } of disconnected) {
-    removeRoomTile(ctx, r, c);
-    move.autoCleanedTiles.push({ r, c });
-  }
-  return true;
+  return false;
 }
 
-function canEraseTile(ctx, r, c) {
-  if (!ctx.room[r][c]) return false;
-  if (ctx.occupancy[r][c] >= 0) return false;
-  if (ctx.roomTiles.length <= 1) return false;
+function hasAnyDoorCandidate(ctx) {
+  if (!ctx.furnitureSet.mustBeIndoors) return true;
+  if (ctx._doorCandidateCache !== undefined) return ctx._doorCandidateCache;
+  const result = _hasAnyDoorCandidateImpl(ctx);
+  ctx._doorCandidateCache = result;
+  return result;
+}
 
-  ctx.room[r][c] = false;
-  const connected = checkRoomConnectivity(ctx);
-  const walkable = connected && checkWalkabilityOpt(ctx);
-  ctx.room[r][c] = true;
-
-  // Stability is handled by createSupportPillars pass after trimming
-  return connected && walkable;
+function _hasAnyDoorCandidateImpl(ctx) {
+  const outside = findOutsideTiles(ctx);
+  for (let r = 0; r < ctx.gridH; r++)
+    for (let c = 0; c < ctx.gridW; c++) {
+      if (ctx.room[r][c] || !outside[r][c]) continue;
+      for (const [dr, dc] of DIRS) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) return true;
+      }
+    }
+  for (let r = 0; r < ctx.gridH; r++)
+    for (let c = 0; c < ctx.gridW; c++) {
+      if (ctx.room[r][c]) continue;
+      for (const [dr, dc] of DIRS) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) return true;
+      }
+    }
+  return false;
 }
 
 // ── Async yield ──────────────────────────────────────────
+function yieldToUI() { return new Promise(resolve => setTimeout(resolve, 0)); }
 
-function yieldToUI() {
-  return new Promise(resolve => setTimeout(resolve, 0));
+// ── Primary stat detection ───────────────────────────────
+function findPrimaryStatIndex(fs, _building) {
+  if (!fs.stats || fs.stats.length === 0) return 0;
+  let servicesIdx = -1, employeesIdx = -1, customIdx = -1;
+  for (let i = 0; i < fs.stats.length; i++) {
+    const s = fs.stats[i];
+    if (s.type === "services" && servicesIdx < 0) servicesIdx = i;
+    if (s.type === "employees" && employeesIdx < 0) employeesIdx = i;
+    if (s.type === "custom" && (s.name === "workers" || s.name === "men") && customIdx < 0) customIdx = i;
+  }
+  if (servicesIdx >= 0) return servicesIdx;
+  if (employeesIdx >= 0) return employeesIdx;
+  if (customIdx >= 0) return customIdx;
+  return 0;
 }
 
-// ── Phase 0-: Room pre-cleanup (trim tendrils) ───────────
+function countItemTiles(item) {
+  let count = 0;
+  for (const row of item.tiles) for (const t of row) if (t !== null) count++;
+  return count;
+}
 
-/** Remove dead-end room tiles (>= 3 non-room cardinal neighbors) before SA. */
+function getValueDensity(ctx, gi, ii) {
+  const { furnitureSet: fs, building: bld, primaryStatIdx } = ctx;
+  const item = fs.groups[gi]?.items[ii];
+  if (!item) return 0;
+  const bItem = bld.items?.[gi];
+  if (!bItem?.stats) return 0;
+  const mult = item.multiplierStats ?? item.multiplier;
+  const statContrib = (bItem.stats[primaryStatIdx] ?? 0) * mult;
+  let tileCount = 0;
+  for (const row of item.tiles) for (const t of row) if (t !== null) tileCount++;
+  if (tileCount === 0) return 0;
+  if (statContrib === 0 && ctx.effIdx >= 0) {
+    const effContrib = (bItem.stats[ctx.effIdx] ?? 0) * mult;
+    if (effContrib > 0) return (effContrib * 10) / tileCount;
+  }
+  if (statContrib === 0 && ctx.relativeIndices.length > 0) {
+    let relContrib = 0;
+    for (const rel of ctx.relativeIndices) relContrib += (bItem.stats[rel.statIdx] ?? 0) * mult;
+    if (relContrib > 0) return (relContrib * 8) / tileCount;
+  }
+  return statContrib / tileCount;
+}
+
+// ── Room pre-cleanup ─────────────────────────────────────
 function preCleanRoom(ctx) {
   for (let pass = 0; pass < 20; pass++) {
     let changed = false;
     for (let i = ctx.roomTiles.length - 1; i >= 0; i--) {
       const { r, c } = ctx.roomTiles[i];
-      // Count non-room cardinal neighbors
       let nonRoom = 0;
       for (const [dr, dc] of DIRS) {
         const nr = r + dr, nc = c + dc;
-        if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) {
-          nonRoom++;
-        }
+        if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) nonRoom++;
       }
       if (nonRoom < 3) continue;
-      // Skip if occupied
       if (ctx.occupancy[r][c] >= 0) continue;
-      // Temporarily erase, check connectivity
       removeRoomTile(ctx, r, c);
-      if (checkRoomConnectivity(ctx)) {
-        changed = true;
-      } else {
-        restoreRoomTile(ctx, r, c);
-      }
+      if (checkRoomConnectivity(ctx)) { changed = true; }
+      else { restoreRoomTile(ctx, r, c); }
     }
     if (!changed) break;
   }
 }
 
-// ── Phase 0: Analysis & Precomputation ───────────────────
+// ── Pre-place support pillars ────────────────────────────
+async function prePlacePillars(ctx) {
+  if (!ctx.furnitureSet.mustBeIndoors) return;
+  for (let pass = 0; pass < 20; pass++) {
+    const unstable = countUnstableTiles(ctx);
+    if (unstable === 0) break;
+    if (pass % 5 === 0) await yieldToUI();
+    let worstR = -1, worstC = -1, worstSupport = Infinity;
+    for (let r = 0; r < ctx.gridH; r++)
+      for (let c = 0; c < ctx.gridW; c++) {
+        if (!ctx.room[r][c]) continue;
+        const sup = tileSupport(ctx.room, ctx.gridW, ctx.gridH, r, c);
+        if (sup < 1.0 && sup < worstSupport) { worstSupport = sup; worstR = r; worstC = c; }
+      }
+    if (worstR < 0) break;
+    let bestCandidate = null, bestCuredCount = 0;
+    const searchRadius = SUPPORT_RADIUS + 1;
+    for (let dr = -searchRadius; dr <= searchRadius; dr++)
+      for (let dc = -searchRadius; dc <= searchRadius; dc++) {
+        const tr = worstR + dr, tc = worstC + dc;
+        if (tr < 0 || tr >= ctx.gridH || tc < 0 || tc >= ctx.gridW) continue;
+        if (!ctx.room[tr][tc]) continue;
+        ctx.room[tr][tc] = false;
+        const newUnstable = countUnstableTiles(ctx);
+        const connected = checkRoomConnectivity(ctx);
+        ctx.room[tr][tc] = true;
+        if (!connected) continue;
+        const cured = unstable - newUnstable;
+        if (cured > bestCuredCount) { bestCuredCount = cured; bestCandidate = { r: tr, c: tc }; }
+      }
+    if (!bestCandidate || bestCuredCount <= 0) break;
+    removeRoomTile(ctx, bestCandidate.r, bestCandidate.c);
+  }
+}
+
+// ── Create support pillars (post-placement) ──────────────
+async function createSupportPillars(ctx) {
+  for (let pass = 0; pass < 10; pass++) {
+    const unstable = countUnstableTiles(ctx);
+    if (unstable === 0) break;
+    await yieldToUI();
+    let worstR = -1, worstC = -1, worstSupport = Infinity;
+    for (let r = 0; r < ctx.gridH; r++)
+      for (let c = 0; c < ctx.gridW; c++) {
+        if (!ctx.room[r][c]) continue;
+        const sup = tileSupport(ctx.room, ctx.gridW, ctx.gridH, r, c);
+        if (sup < 1.0 && sup < worstSupport) { worstSupport = sup; worstR = r; worstC = c; }
+      }
+    if (worstR < 0) break;
+    let bestCandidate = null, bestCuredCount = 0;
+    const searchRadius = SUPPORT_RADIUS + 1;
+    for (let dr = -searchRadius; dr <= searchRadius; dr++)
+      for (let dc = -searchRadius; dc <= searchRadius; dc++) {
+        const tr = worstR + dr, tc = worstC + dc;
+        if (tr < 0 || tr >= ctx.gridH || tc < 0 || tc >= ctx.gridW) continue;
+        if (!ctx.room[tr][tc] || ctx.occupancy[tr][tc] >= 0) continue;
+        ctx.room[tr][tc] = false;
+        const newUnstable = countUnstableTiles(ctx);
+        const connected = checkRoomConnectivity(ctx);
+        const walkable = connected && checkWalkabilityOpt(ctx);
+        ctx.room[tr][tc] = true;
+        if (!connected || !walkable) continue;
+        const cured = unstable - newUnstable;
+        if (cured > bestCuredCount) { bestCuredCount = cured; bestCandidate = { r: tr, c: tc }; }
+      }
+    if (!bestCandidate || bestCuredCount <= 0) break;
+    removeRoomTile(ctx, bestCandidate.r, bestCandidate.c);
+  }
+}
+
+// ── Isolation check ──────────────────────────────────────
+function computeIsolationOpt(ctx) {
+  if (!ctx.furnitureSet.mustBeIndoors) return 1;
+  const { gridW, gridH, room, doors } = ctx;
+  const walls = Array.from({ length: gridH }, () => Array(gridW).fill(false));
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++) {
+      if (room[r][c]) continue;
+      let adjRoom = false;
+      for (const [dr, dc] of DIRS8) {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && room[nr][nc]) { adjRoom = true; break; }
+      }
+      if (adjRoom && !doors.has(`${r},${c}`)) walls[r][c] = true;
+    }
+  let edgeTiles = 0, total = 0, unwalled = 0;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++) {
+      if (!room[r][c]) continue;
+      let isEdge = false;
+      for (const [dr, dc] of DIRS8) {
+        const nr = r + dr, nc = c + dc;
+        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !room[nr][nc]) { isEdge = true; break; }
+      }
+      if (!isEdge) continue;
+      edgeTiles++;
+      for (const [dr, dc] of DIRS8) {
+        const nr = r + dr, nc = c + dc;
+        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) { total++; unwalled++; }
+        else if (!room[nr][nc]) {
+          total++;
+          if (!walls[nr][nc]) unwalled += doors.has(`${nr},${nc}`) ? 0.34 : 1;
+        }
+      }
+    }
+  if (total === 0) return 1;
+  const bonus = Math.ceil(edgeTiles / 10);
+  const raw = Math.min(1, Math.max(0, (total - unwalled + bonus) / total));
+  return Math.pow(raw, 1.5);
+}
+
+// ── Outside tiles / door helpers ─────────────────────────
+function findOutsideTiles(ctx) {
+  const { gridW, gridH, room } = ctx;
+  const outside = Array.from({ length: gridH }, () => Array(gridW).fill(false));
+  const q = ctx.bfsQueue;
+  q.reset();
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++) {
+      if (room[r][c]) continue;
+      if (r === 0 || r === gridH - 1 || c === 0 || c === gridW - 1) {
+        outside[r][c] = true;
+        q.push(r, c);
+      }
+    }
+  if (q.length === 0) {
+    for (let r = 0; r < gridH; r++)
+      for (let c = 0; c < gridW; c++) {
+        if (room[r][c] || outside[r][c]) continue;
+        for (const [dr, dc] of DIRS) {
+          const nr = r + dr, nc = c + dc;
+          if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) {
+            outside[r][c] = true; q.push(r, c); break;
+          }
+        }
+      }
+  }
+  while (q.length > 0) {
+    const [cr, cc] = q.shift();
+    for (const [dr, dc] of DIRS) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      if (outside[nr][nc] || room[nr][nc]) continue;
+      outside[nr][nc] = true;
+      q.push(nr, nc);
+    }
+  }
+  return outside;
+}
+
+function isOpenTile(ctx, r, c) {
+  if (r < 0 || r >= ctx.gridH || c < 0 || c >= ctx.gridW) return true;
+  if (ctx.room[r][c]) return false;
+  for (const [dr, dc] of DIRS) {
+    const nr = r + dr, nc = c + dc;
+    if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) return false;
+  }
+  return true;
+}
+
+// ══════════════════════════════════════════════════════════
+// Phase 0: Analysis & tile profile computation
+// ══════════════════════════════════════════════════════════
+
+/**
+ * Compute tile profile for an item at a given rotation.
+ * @returns {{ totalTiles: number, blockerTiles: number, mrTiles: number, hasStorage: boolean, mrEdges: number[], width: number, height: number }}
+ */
+function computeTileProfile(ctx, groupIdx, itemIdx, rotation) {
+  const tiles = getCachedTiles(ctx, groupIdx, itemIdx, rotation);
+  const fs = ctx.furnitureSet;
+  const height = tiles.length;
+  let width = 0;
+  for (const row of tiles) width = Math.max(width, row?.length ?? 0);
+
+  let totalTiles = 0, blockerTiles = 0, mrTiles = 0, hasStorage = false;
+  // Track which perimeter edges have MR tiles
+  // Edge 0=top, 1=right, 2=bottom, 3=left
+  const mrEdges = [];
+  const mrPositions = [];
+
+  for (let r = 0; r < height; r++) {
+    for (let c = 0; c < width; c++) {
+      const tileKey = tiles[r]?.[c];
+      if (tileKey === null || tileKey === undefined) continue;
+      totalTiles++;
+      const tt = fs.tileTypes[tileKey];
+      if (!tt) continue;
+      if (AVAIL_BLOCKING.has(tt.availability)) blockerTiles++;
+      if (tt.mustBeReachable) {
+        mrTiles++;
+        mrPositions.push({ r, c });
+      }
+      if (tt.data === 2) hasStorage = true;
+    }
+  }
+
+  // Determine which edges have MR tiles on the perimeter
+  for (const { r, c } of mrPositions) {
+    if (r === 0 && !mrEdges.includes(0)) mrEdges.push(0);
+    if (c === width - 1 && !mrEdges.includes(1)) mrEdges.push(1);
+    if (r === height - 1 && !mrEdges.includes(2)) mrEdges.push(2);
+    if (c === 0 && !mrEdges.includes(3)) mrEdges.push(3);
+  }
+
+  return { totalTiles, blockerTiles, mrTiles, hasStorage, mrEdges, width, height };
+}
+
+/**
+ * Check if an item is "self-corridored" — has null gaps that provide inherent walkability.
+ */
+function isSelfCorridored(ctx, groupIdx, itemIdx, rotation) {
+  const tiles = getCachedTiles(ctx, groupIdx, itemIdx, rotation);
+  const height = tiles.length;
+  let width = 0;
+  for (const row of tiles) width = Math.max(width, row?.length ?? 0);
+  if (height <= 1) return false;
+
+  // Check if any row has null tiles within the bounding box
+  for (let r = 0; r < height; r++) {
+    for (let c = 0; c < width; c++) {
+      const tileKey = tiles[r]?.[c];
+      if (tileKey === null || tileKey === undefined) return true;
+    }
+  }
+  return false;
+}
 
 function analyzePhase(ctx) {
   const { furnitureSet: fs, building: bld } = ctx;
 
-  // Find employees/efficiency stat indices
   ctx.empIdx = -1;
   ctx.effIdx = -1;
   if (fs.stats) {
@@ -1411,18 +983,14 @@ function analyzePhase(ctx) {
     }
   }
 
-  // Build room tile list
   rebuildRoomTiles(ctx);
 
   // Pre-compute all rotated tile arrays
   for (let gi = 0; gi < fs.groups.length; gi++) {
     const group = fs.groups[gi];
     const rots = getAllowedRotations(group);
-    for (let ii = 0; ii < group.items.length; ii++) {
-      for (const rot of rots) {
-        getCachedTiles(ctx, gi, ii, rot); // populates cache
-      }
-    }
+    for (let ii = 0; ii < group.items.length; ii++)
+      for (const rot of rots) getCachedTiles(ctx, gi, ii, rot);
   }
 
   // Classify groups
@@ -1430,11 +998,7 @@ function analyzePhase(ctx) {
   for (let gi = 0; gi < fs.groups.length; gi++) {
     const group = fs.groups[gi];
     const bItem = bld.items?.[gi];
-    let hasPrimary = false;
-    let hasEfficiency = false;
-    let hasRelative = false;
-    let isDecorative = true;
-
+    let hasPrimary = false, hasEfficiency = false, hasRelative = false, isDecorative = true;
     if (bItem?.stats) {
       for (let s = 0; s < bItem.stats.length && s < (fs.stats?.length ?? 0); s++) {
         if (bItem.stats[s] !== 0) {
@@ -1445,473 +1009,414 @@ function analyzePhase(ctx) {
         }
       }
     }
-
-    // Relative-contributing groups are not decorative
     if (hasRelative) isDecorative = false;
 
-    // Check if group has blocking tiles or storage tiles
-    let hasBlockers = false;
-    let isStorage = false;
-    for (const item of group.items) {
-      for (const row of item.tiles) {
+    let hasBlockers = false, isStorage = false;
+    for (const item of group.items)
+      for (const row of item.tiles)
         for (const tileKey of row) {
           if (tileKey === null) continue;
           const tt = fs.tileTypes[tileKey];
           if (tt && AVAIL_BLOCKING.has(tt.availability)) hasBlockers = true;
           if (tt?.data === 2) isStorage = true;
         }
-      }
-    }
 
-    // Priority: required > primary-stat > efficiency/relative > decorative
     let priority = 3;
     if (group.min > 0) priority = 0;
     else if (hasPrimary) priority = 1;
     else if (hasEfficiency || hasRelative) priority = 2;
 
-    // Hero item analysis: identify high-density items vs fillers
+    // Hero items
     const densities = group.items.map((_, ii) => ({
-      ii,
-      density: getValueDensity(ctx, gi, ii),
-      tileCount: countItemTiles(group.items[ii]),
+      ii, density: getValueDensity(ctx, gi, ii), tileCount: countItemTiles(group.items[ii]),
     }));
     const maxDensity = Math.max(...densities.map(d => d.density), 0);
     const heroThreshold = maxDensity * 0.85;
-
-    const heroItems = densities
-      .filter(d => d.density >= heroThreshold && d.density > 0)
+    const heroItems = densities.filter(d => d.density >= heroThreshold && d.density > 0)
       .sort((a, b) => b.density - a.density || a.tileCount - b.tileCount);
-    const fillerItems = densities
-      .filter(d => d.density < heroThreshold || d.density === 0)
-      .sort((a, b) => a.tileCount - b.tileCount); // smallest first for gap fill
-
+    const fillerItems = densities.filter(d => d.density < heroThreshold || d.density === 0)
+      .sort((a, b) => a.tileCount - b.tileCount);
     const bestHeroIdx = heroItems.length > 0 ? heroItems[0].ii : -1;
 
     ctx.groupInfo.push({
-      groupIdx: gi, isDecorative, hasPrimary, hasEfficiency, hasRelative, hasBlockers, isStorage, priority,
-      heroItems: heroItems.map(h => h.ii),
-      bestHeroIdx,
+      groupIdx: gi, isDecorative, hasPrimary, hasEfficiency, hasRelative,
+      hasBlockers, isStorage, priority,
+      heroItems: heroItems.map(h => h.ii), bestHeroIdx,
       fillerItems: fillerItems.map(f => f.ii),
     });
   }
 }
 
-/** Count wall/non-room neighbors for a room tile (for wall-priority sorting). */
-function countWallNeighbors(ctx, r, c) {
-  let count = 0;
-  for (const [dr, dc] of DIRS) {
-    const nr = r + dr, nc = c + dc;
-    if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) {
-      count++;
-    }
-  }
-  return count;
-}
+// ══════════════════════════════════════════════════════════
+// Phase 1: Strip Pattern Discovery
+// ══════════════════════════════════════════════════════════
 
-/** Count non-null tiles in an item. */
-function countItemTiles(item) {
-  let count = 0;
-  for (const row of item.tiles) {
-    for (const t of row) {
-      if (t !== null) count++;
-    }
-  }
-  return count;
-}
+/**
+ * @typedef {Object} StripCandidate
+ * @property {number} groupIdx
+ * @property {number} itemIdx
+ * @property {number} rotation
+ * @property {boolean} backToBack - can mirror-pair items back-to-back?
+ * @property {number} pitch - total rows per repeating unit (incl corridor)
+ * @property {number} statPerTile - primary stat density
+ * @property {boolean} selfCorridored
+ * @property {number[]} corridorEdges - which edges need corridors (0=top, 2=bottom)
+ * @property {number} width - item width
+ * @property {number} height - item height
+ * @property {number} wallSavings - rows saved when against a wall
+ */
 
-// ── Pre-place support pillars ────────────────────────────
-
-async function prePlacePillars(ctx) {
-  if (!ctx.furnitureSet.mustBeIndoors) return;
-
-  for (let pass = 0; pass < 20; pass++) {
-    const unstable = countUnstableTiles(ctx);
-    if (unstable === 0) break;
-    if (pass % 5 === 0) await yieldToUI();
-
-    // Find the worst unstable tile (lowest support)
-    let worstR = -1, worstC = -1, worstSupport = Infinity;
-    for (let r = 0; r < ctx.gridH; r++) {
-      for (let c = 0; c < ctx.gridW; c++) {
-        if (!ctx.room[r][c]) continue;
-        const sup = tileSupport(ctx.room, ctx.gridW, ctx.gridH, r, c);
-        if (sup < 1.0 && sup < worstSupport) {
-          worstSupport = sup;
-          worstR = r;
-          worstC = c;
-        }
-      }
-    }
-    if (worstR < 0) break;
-
-    // Find best tile to erase near the unstable zone (no furniture yet, only check connectivity)
-    let bestCandidate = null;
-    let bestCuredCount = 0;
-    const searchRadius = SUPPORT_RADIUS + 1;
-
-    for (let dr = -searchRadius; dr <= searchRadius; dr++) {
-      for (let dc = -searchRadius; dc <= searchRadius; dc++) {
-        const tr = worstR + dr, tc = worstC + dc;
-        if (tr < 0 || tr >= ctx.gridH || tc < 0 || tc >= ctx.gridW) continue;
-        if (!ctx.room[tr][tc]) continue;
-
-        ctx.room[tr][tc] = false;
-        const newUnstable = countUnstableTiles(ctx);
-        const connected = checkRoomConnectivity(ctx);
-        ctx.room[tr][tc] = true;
-
-        if (!connected) continue;
-        const cured = unstable - newUnstable;
-        if (cured > bestCuredCount) {
-          bestCuredCount = cured;
-          bestCandidate = { r: tr, c: tc };
-        }
-      }
-    }
-
-    if (!bestCandidate || bestCuredCount <= 0) break;
-
-    removeRoomTile(ctx, bestCandidate.r, bestCandidate.c);
-  }
-}
-
-// ── Value density computation ────────────────────────────
-
-function getValueDensity(ctx, gi, ii) {
+function discoverStripCandidates(ctx) {
   const { furnitureSet: fs, building: bld, primaryStatIdx } = ctx;
-  const item = fs.groups[gi]?.items[ii];
-  if (!item) return 0;
-  const bItem = bld.items?.[gi];
-  if (!bItem?.stats) return 0;
+  const candidates = [];
 
-  const mult = item.multiplierStats ?? item.multiplier;
-  const statContrib = (bItem.stats[primaryStatIdx] ?? 0) * mult;
+  for (const gInfo of ctx.groupInfo) {
+    if (!gInfo.hasPrimary && gInfo.priority > 1) continue;
+    const gi = gInfo.groupIdx;
+    const group = fs.groups[gi];
+    const rots = getAllowedRotations(group);
+    const bItem = bld.items?.[gi];
 
-  // Count non-null tiles
-  let tileCount = 0;
-  for (const row of item.tiles) {
-    for (const t of row) {
-      if (t !== null) tileCount++;
+    for (let ii = 0; ii < group.items.length; ii++) {
+      const item = group.items[ii];
+      const mult = item.multiplierStats ?? item.multiplier;
+      const statContrib = bItem?.stats ? (bItem.stats[primaryStatIdx] ?? 0) * mult : 0;
+      if (statContrib <= 0 && gInfo.hasPrimary) continue;
+
+      for (const rot of rots) {
+        const profile = computeTileProfile(ctx, gi, ii, rot);
+        if (profile.totalTiles === 0) continue;
+
+        const selfCorr = isSelfCorridored(ctx, gi, ii, rot);
+
+        // Determine corridor needs based on MR edges
+        let corridorEdges = [];
+        if (profile.mrTiles > 0) {
+          corridorEdges = [...profile.mrEdges];
+        }
+
+        // Calculate pitch (strip height including corridors)
+        let pitch, backToBack = false, wallSavings = 0;
+
+        if (selfCorr) {
+          // Self-corridored: no extra corridor rows needed
+          pitch = profile.height;
+          wallSavings = 0;
+        } else if (corridorEdges.length === 0) {
+          // No MR tiles — pure blockers, stack directly
+          pitch = profile.height;
+          wallSavings = 0;
+        } else if (corridorEdges.length === 1) {
+          // Single-sided MR: can pack back-to-back with mirrored copy
+          // [corridor] [MR] [blockers] [blockers_mirrored] [MR_mirrored] [corridor]
+          // Pitch for a pair = 2 * height + 1 corridor (shared between pairs)
+          // Single strip pitch = height + 1 corridor
+          backToBack = true;
+          pitch = profile.height + 1; // one corridor row per item
+          wallSavings = 1; // wall replaces the non-MR side corridor
+        } else {
+          // Double-sided MR: need corridors on both sides
+          pitch = profile.height + 1; // one shared corridor between strips
+          wallSavings = 0; // both sides need access
+        }
+
+        const statPerTile = statContrib / (pitch * profile.width);
+
+        candidates.push({
+          groupIdx: gi, itemIdx: ii, rotation: rot,
+          backToBack, pitch, statPerTile, selfCorridored: selfCorr,
+          corridorEdges, width: profile.width, height: profile.height,
+          wallSavings, statContrib,
+        });
+      }
     }
   }
-  if (tileCount === 0) return 0;
 
-  // If group has no primary stat but HAS efficiency, use efficiency density (scaled 10x)
-  if (statContrib === 0 && ctx.effIdx >= 0) {
-    const effContrib = (bItem.stats[ctx.effIdx] ?? 0) * mult;
-    if (effContrib > 0) return (effContrib * 10) / tileCount;
-  }
-
-  // If group has no primary stat but HAS relative stats, use relative density (scaled 8x)
-  if (statContrib === 0 && ctx.relativeIndices.length > 0) {
-    let relContrib = 0;
-    for (const rel of ctx.relativeIndices) {
-      relContrib += (bItem.stats[rel.statIdx] ?? 0) * mult;
-    }
-    if (relContrib > 0) return (relContrib * 8) / tileCount;
-  }
-
-  return statContrib / tileCount;
+  // Sort by stat density (best first)
+  candidates.sort((a, b) => b.statPerTile - a.statPerTile);
+  return candidates;
 }
 
-/** Compute neatness score in the neighborhood of a placed piece.
- *  Used by polish rotation pass to compare orientations with full neatness weights.
- *  Evaluates H1 (walkable-sharing), H2 (blocker-packing), H3 (dead-space) within ±2 tiles of the piece.
- *  NOTE: The H1/H2/H3 logic is intentionally duplicated from scoreLayoutSA's neatness scan —
- *  this version operates on a local bounding box for O(piece_area) instead of O(grid_area). */
-function computeLocalNeatness(ctx, pi) {
-  const p = ctx.placements[pi];
-  const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-  const { gridW, gridH } = ctx;
+// ══════════════════════════════════════════════════════════
+// Phase 2: Room Filling with Strips
+// ══════════════════════════════════════════════════════════
 
-  // Collect unique cells in the neighborhood (piece tiles + 2-cell border)
-  const minR = Math.max(0, p.row - 2), maxR = Math.min(gridH - 1, p.row + tiles.length + 1);
-  const minC = Math.max(0, p.col - 2);
-  let maxC = p.col + 1;
-  for (let r = 0; r < tiles.length; r++) {
-    const rowLen = tiles[r]?.length ?? 0;
-    if (p.col + rowLen + 1 > maxC) maxC = p.col + rowLen + 1;
-  }
-  maxC = Math.min(gridW - 1, maxC);
+/**
+ * Find the largest axis-aligned rectangle of room tiles.
+ * Uses the standard maximal rectangle in histogram approach.
+ * @returns {{ minR: number, minC: number, maxR: number, maxC: number, area: number }}
+ */
+function findLargestRect(ctx) {
+  const { gridW, gridH, room } = ctx;
+  // Heights histogram: height[c] = consecutive room tiles above (including current row)
+  const height = new Int32Array(gridW);
+  let bestArea = 0, bestMinR = 0, bestMinC = 0, bestMaxR = 0, bestMaxC = 0;
 
-  let walkableSharingBonus = 0;
-  let blockerPackingBonus = 0;
-  let deadSpacePenalty = 0;
+  for (let r = 0; r < gridH; r++) {
+    for (let c = 0; c < gridW; c++) {
+      height[c] = room[r][c] ? height[c] + 1 : 0;
+    }
 
-  for (let r = minR; r <= maxR; r++) {
-    for (let c = minC; c <= maxC; c++) {
-      if (!ctx.room[r][c]) continue;
-
-      const isOccupied = ctx.occupancy[r][c] >= 0;
-      const isBlocked = ctx.blockerCount[r][c] > 0;
-      const isMustReach = ctx.mustReachGrid[r * gridW + c] === 1;
-
-      if (!isOccupied && !isBlocked) {
-        let adjMR = 0;
-        for (const [dr, dc] of DIRS) {
-          const nr = r + dr, nc = c + dc;
-          if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
-              && ctx.mustReachGrid[nr * gridW + nc] === 1) adjMR++;
+    // Largest rectangle in histogram (stack-based)
+    const stack = []; // indices into height array
+    for (let c = 0; c <= gridW; c++) {
+      const h = c < gridW ? height[c] : 0;
+      while (stack.length > 0 && height[stack[stack.length - 1]] > h) {
+        const top = stack.pop();
+        const w = stack.length === 0 ? c : c - stack[stack.length - 1] - 1;
+        const area = height[top] * w;
+        if (area > bestArea) {
+          bestArea = area;
+          bestMaxR = r;
+          bestMinR = r - height[top] + 1;
+          bestMinC = stack.length === 0 ? 0 : stack[stack.length - 1] + 1;
+          bestMaxC = c - 1;
         }
-        if (adjMR >= 2) walkableSharingBonus += adjMR * (adjMR - 1) / 2;
-        if (adjMR === 0) {
-          let blockedNeighbors = 0;
-          for (const [dr, dc] of DIRS) {
-            const nr = r + dr, nc = c + dc;
-            if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) blockedNeighbors++;
-            else if (ctx.blockerCount[nr][nc] > 0) blockedNeighbors++;
+      }
+      stack.push(c);
+    }
+  }
+
+  return { minR: bestMinR, minC: bestMinC, maxR: bestMaxR, maxC: bestMaxC, area: bestArea };
+}
+
+/**
+ * Place one item at the given position. Returns true if placed successfully.
+ */
+function placeItem(ctx, groupIdx, itemIdx, rotation, row, col) {
+  if (!canPlaceOpt(ctx, groupIdx, itemIdx, rotation, row, col, undefined)) return false;
+  const pi = ctx.placements.length;
+  ctx.placements.push({ groupIdx, itemIdx, rotation, row, col });
+  setOccupancy(ctx, pi);
+
+  if (!hasAnyDoorCandidate(ctx) || !checkWalkabilityOpt(ctx)) {
+    clearOccupancy(ctx, pi);
+    ctx.placements.pop();
+    return false;
+  }
+  if (ctx.groupCounts) ctx.groupCounts[groupIdx]++;
+  return true;
+}
+
+/**
+ * Try to find the largest item variant from the same group+rotation that fits
+ * along a strip line at position (row, col).
+ * Returns the placed item index or -1.
+ */
+function _placeBestFittingItem(ctx, strip, row, col) {
+  const group = ctx.furnitureSet.groups[strip.groupIdx];
+  const maxP = group.max ?? 100;
+  if (countGroupPlacements(ctx, strip.groupIdx) >= maxP) return -1;
+
+  // Try items from largest to smallest (items are typically ordered by multiplier/size)
+  const items = group.items;
+  const rots = [strip.rotation];
+
+  // Collect items with same rotation and sort by multiplier descending
+  const candidates = [];
+  for (let ii = 0; ii < items.length; ii++) {
+    const tiles = getCachedTiles(ctx, strip.groupIdx, ii, strip.rotation);
+    // Must have compatible height with the strip
+    if (tiles.length !== strip.height) continue;
+    candidates.push({ ii, mult: items[ii].multiplierStats ?? items[ii].multiplier });
+  }
+  candidates.sort((a, b) => b.mult - a.mult);
+
+  for (const { ii } of candidates) {
+    for (const rot of rots) {
+      if (placeItem(ctx, strip.groupIdx, ii, rot, row, col)) return ii;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Get the mirror rotation for back-to-back placement.
+ * Rotation 0→2 (flip vertical), 1→3 (flip horizontal).
+ */
+function getMirrorRotation(rot) {
+  return (rot + 2) % 4;
+}
+
+/**
+ * Fill the room with strips of the given candidate.
+ * Tries placing items along rows/cols with proper spacing for corridors.
+ * @param {object} ctx
+ * @param {StripCandidate} strip
+ * @param {boolean} horizontal - true = strips run horizontally, false = vertical
+ * @param {object} rect - bounding rectangle {minR, minC, maxR, maxC}
+ */
+function fillWithStrips(ctx, strip, horizontal, rect) {
+  const { minR, minC, maxR, maxC } = rect;
+  const group = ctx.furnitureSet.groups[strip.groupIdx];
+  const rots = getAllowedRotations(group);
+
+  // Collect items sorted by multiplier descending for each compatible rotation
+  function getItemsByHeight(targetHeight, rot) {
+    const items = [];
+    for (let ii = group.items.length - 1; ii >= 0; ii--) {
+      const tiles = getCachedTiles(ctx, strip.groupIdx, ii, rot);
+      if (tiles.length === targetHeight) items.push(ii);
+    }
+    return items;
+  }
+
+  function fillStripLine(rot, row, col, horizontal2) {
+    const items = getItemsByHeight(strip.height, rot);
+    if (horizontal2) {
+      let c = col;
+      while (c <= maxC) {
+        const maxP = group.max ?? 100;
+        if (countGroupPlacements(ctx, strip.groupIdx) >= maxP) return;
+        let placed = false;
+        for (const ii of items) {
+          const tiles = getCachedTiles(ctx, strip.groupIdx, ii, rot);
+          const w = tiles[0]?.length ?? 0;
+          if (c + w - 1 > maxC) continue;
+          if (placeItem(ctx, strip.groupIdx, ii, rot, row, c)) { c += w; placed = true; break; }
+        }
+        if (!placed) c++;
+      }
+    } else {
+      let r = row;
+      while (r <= maxR) {
+        const maxP = group.max ?? 100;
+        if (countGroupPlacements(ctx, strip.groupIdx) >= maxP) return;
+        let placed = false;
+        for (const ii of items) {
+          const tiles = getCachedTiles(ctx, strip.groupIdx, ii, rot);
+          const h = tiles.length;
+          if (r + h - 1 > maxR) continue;
+          if (placeItem(ctx, strip.groupIdx, ii, rot, r, col)) { r += h; placed = true; break; }
+        }
+        if (!placed) r++;
+      }
+    }
+  }
+
+  if (horizontal) {
+    let currentRow = minR;
+    while (currentRow + strip.height - 1 <= maxR) {
+      fillStripLine(strip.rotation, currentRow, minC, true);
+
+      // Back-to-back: place mirrored strip
+      if (strip.backToBack) {
+        const mirrorRot = getMirrorRotation(strip.rotation);
+        if (rots.includes(mirrorRot)) {
+          const mirrorRow = currentRow + strip.height;
+          if (mirrorRow + strip.height - 1 <= maxR) {
+            fillStripLine(mirrorRot, mirrorRow, minC, true);
+            currentRow += strip.height * 2 + 1;
+            continue;
           }
-          if (blockedNeighbors >= 3) deadSpacePenalty++;
         }
-      } else if (isBlocked && !isMustReach) {
-        let packedNeighbors = 0;
-        for (const [dr, dc] of DIRS) {
-          const nr = r + dr, nc = c + dc;
-          if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) packedNeighbors++;
-          else if (ctx.blockerCount[nr][nc] > 0) packedNeighbors++;
-        }
-        blockerPackingBonus += packedNeighbors;
       }
+      currentRow += strip.pitch;
     }
-  }
+  } else {
+    let currentCol = minC;
+    while (currentCol + strip.width - 1 <= maxC) {
+      fillStripLine(strip.rotation, minR, currentCol, false);
 
-  return walkableSharingBonus * 4 + blockerPackingBonus - deadSpacePenalty * 2;
-}
-
-/** Score a candidate placement position: value density + wall/corner adjacency + furniture proximity.
- *  Phase 2a: Wall-first rebalancing. When ctx.useNeatnessPlacement is set, also adds H5 facing bonus. */
-function scorePlacementPosition(ctx, gi, ii, rot, r, c) {
-  let posScore = getValueDensity(ctx, gi, ii);
-  const tiles = getCachedTiles(ctx, gi, ii, rot);
-  let wallAdj = 0;
-  let cornerAdj = 0;
-  let furnitureAdj = 0;
-  let facingBonus = 0;
-  for (let tr = 0; tr < tiles.length; tr++) {
-    for (let tc = 0; tc < (tiles[tr]?.length ?? 0); tc++) {
-      if (tiles[tr][tc] === null) continue;
-      const gr = r + tr, gc = c + tc;
-      let tileWallCount = 0;
-      for (const [dr, dc] of DIRS) {
-        const nr = gr + dr, nc = gc + dc;
-        if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) {
-          wallAdj++;
-          tileWallCount++;
-        } else if (ctx.occupancy[nr][nc] >= 0) {
-          furnitureAdj++;
-        }
-      }
-      if (tileWallCount >= 2) cornerAdj++;
-
-      // H5: MR tiles facing existing MR across a 1-tile walkable gap (neatness restart only)
-      if (ctx.useNeatnessPlacement) {
-        const tileKey = tiles[tr][tc];
-        const tt = ctx.furnitureSet.tileTypes[tileKey];
-        const isBlocking = tt && AVAIL_BLOCKING.has(tt.availability);
-        const isMR = tt?.mustBeReachable;
-        // Blocker against wall = good; MR against wall = prefer open access
-        if (isBlocking && !isMR && tileWallCount > 0) facingBonus += tileWallCount;
-        if (isMR && tileWallCount > 0) facingBonus -= 0.5 * tileWallCount;
-        if (isMR) {
-          for (const [dr, dc] of DIRS) {
-            const nr2 = gr + dr * 2, nc2 = gc + dc * 2;
-            if (nr2 >= 0 && nr2 < ctx.gridH && nc2 >= 0 && nc2 < ctx.gridW
-                && ctx.mustReachGrid[nr2 * ctx.gridW + nc2] === 1) {
-              const nr1 = gr + dr, nc1 = gc + dc;
-              if (nr1 >= 0 && nr1 < ctx.gridH && nc1 >= 0 && nc1 < ctx.gridW
-                  && ctx.room[nr1][nc1] && ctx.blockerCount[nr1][nc1] === 0
-                  && ctx.occupancy[nr1][nc1] < 0) {
-                facingBonus += 2.5;
-              }
-            }
+      if (strip.backToBack) {
+        const mirrorRot = getMirrorRotation(strip.rotation);
+        if (rots.includes(mirrorRot)) {
+          const mirrorCol = currentCol + strip.width;
+          if (mirrorCol + strip.width - 1 <= maxC) {
+            fillStripLine(mirrorRot, minR, mirrorCol, false);
+            currentCol += strip.width * 2 + 1;
+            continue;
           }
         }
       }
+      currentCol += strip.selfCorridored ? strip.width : strip.width + 1;
     }
   }
-  return posScore + wallAdj * 3.0 + furnitureAdj + cornerAdj * 1.5 + facingBonus;
 }
 
-// ── Phase 1: Smart Constructive Phase ────────────────────
+/**
+ * Main strip-based filling for primary stat groups.
+ */
+async function stripFillPhase(ctx) {
+  const candidates = discoverStripCandidates(ctx);
+  if (candidates.length === 0) return;
 
-async function constructivePhase(ctx, skipInterval) {
+  const rect = findLargestRect(ctx);
+  if (rect.area === 0) return;
+
+  const _rectW = rect.maxC - rect.minC + 1;
+  const _rectH = rect.maxR - rect.minR + 1;
+
+  // Try the best strip candidates in both orientations, keep the best result
+  let bestSnapshot = null;
+  let bestPrimaryVal = -Infinity;
+  const initialSnap = takeSnapshot(ctx);
+
+  // Try top N strip candidates in both orientations
+  const topCandidates = candidates.slice(0, Math.min(8, candidates.length));
+
+  for (const strip of topCandidates) {
+    // Try horizontal fill
+    restoreSnapshot(ctx, initialSnap);
+    fillWithStrips(ctx, strip, true, rect);
+    let stats = getStats(ctx);
+    let primaryVal = stats[ctx.primaryStatIdx] ?? 0;
+    if (primaryVal > bestPrimaryVal) {
+      bestPrimaryVal = primaryVal;
+      bestSnapshot = takeSnapshot(ctx);
+    }
+
+    // Try vertical fill with same strip
+    restoreSnapshot(ctx, initialSnap);
+    fillWithStrips(ctx, strip, false, rect);
+    stats = getStats(ctx);
+    primaryVal = stats[ctx.primaryStatIdx] ?? 0;
+    if (primaryVal > bestPrimaryVal) {
+      bestPrimaryVal = primaryVal;
+      bestSnapshot = takeSnapshot(ctx);
+    }
+
+    // Try rotated strip in both orientations
+    const group = ctx.furnitureSet.groups[strip.groupIdx];
+    const rots = getAllowedRotations(group);
+    for (const altRot of rots) {
+      if (altRot === strip.rotation) continue;
+      const vProfile = computeTileProfile(ctx, strip.groupIdx, strip.itemIdx, altRot);
+      const altStrip = {
+        ...strip, rotation: altRot,
+        width: vProfile.width, height: vProfile.height,
+        corridorEdges: vProfile.mrEdges,
+      };
+
+      for (const horiz of [true, false]) {
+        restoreSnapshot(ctx, initialSnap);
+        fillWithStrips(ctx, altStrip, horiz, rect);
+        stats = getStats(ctx);
+        primaryVal = stats[ctx.primaryStatIdx] ?? 0;
+        if (primaryVal > bestPrimaryVal) {
+          bestPrimaryVal = primaryVal;
+          bestSnapshot = takeSnapshot(ctx);
+        }
+      }
+    }
+
+    await yieldToUI();
+  }
+
+  // Restore best strip fill result
+  if (bestSnapshot) {
+    restoreSnapshot(ctx, bestSnapshot);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// Phase 3: Stat Balancing (efficiency, relative, storage)
+// ══════════════════════════════════════════════════════════
+
+function placeEfficiencyItems(ctx) {
   const { furnitureSet: fs } = ctx;
-
-  // Disable incremental groupCounts during constructive phase — use linear scan fallback.
-  // This avoids stale counts since constructive doesn't maintain groupCounts incrementally.
-  ctx.groupCounts = null;
-
-  // Phase 2g: Sort roomTiles for wall-priority constructive scan
-  // Corner tiles first (2+ wall neighbors), then wall-adjacent, then interior
-  ctx.roomTiles.sort((a, b) => {
-    const wallA = countWallNeighbors(ctx, a.r, a.c);
-    const wallB = countWallNeighbors(ctx, b.r, b.c);
-    return wallB - wallA; // more wall neighbors first
-  });
-
-  // Sort groups by priority
-  const sortedGroups = [...ctx.groupInfo].sort((a, b) => a.priority - b.priority);
-
-  // Pass 1 — Hero placement: place best hero items exhaustively
-  let placementCount = 0;
-  for (const gInfo of sortedGroups) {
-    const gi = gInfo.groupIdx;
-    const group = fs.groups[gi];
-    const maxPlacements = group.max ?? 100;
-
-    // Pure efficiency groups handled by interleaving
-    if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-      continue;
-    }
-
-    // Pure relative groups handled by interleaving
-    if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) {
-      continue;
-    }
-
-    let placed = countGroupPlacements(ctx, gi);
-    const rots = getAllowedRotations(group);
-
-    // Try hero items from best to worst.
-    // For required groups with no heroes (all zero density), use fillers to meet min.
-    let heroList = gInfo.heroItems.length > 0 ? gInfo.heroItems : [gInfo.bestHeroIdx];
-    if (heroList.length === 1 && heroList[0] < 0 && group.min > 0 && gInfo.fillerItems.length > 0) {
-      // Use smallest filler for required zero-density groups (e.g. storage shelves)
-      // SA UPGRADE/RESIZE can grow it later only if it doesn't hurt the score
-      heroList = [gInfo.fillerItems[0]];
-    }
-    for (const ii of heroList) {
-      if (ii < 0) continue;
-      // Repeatedly place this hero item until it can't fit
-      let keepGoing = true;
-      while (keepGoing && placed < maxPlacements) {
-        keepGoing = false;
-
-        // Diversity: for restart variants, skip every Nth placement
-        if (skipInterval > 0 && placementCount % skipInterval === (skipInterval - 1)) {
-          placementCount++;
-          break;
-        }
-
-        let bestPos = null;
-        let bestScore = -Infinity;
-        for (const rot of rots) {
-          for (const { r, c } of ctx.roomTiles) {
-            if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
-            const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-            if (posScore > bestScore) {
-              bestScore = posScore;
-              bestPos = { rot, row: r, col: c };
-            }
-          }
-        }
-
-        if (bestPos) {
-          const pi = ctx.placements.length;
-          ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: bestPos.rot, row: bestPos.row, col: bestPos.col });
-          setOccupancy(ctx, pi);
-
-          // Reject if this breaks walkability or blocks all door candidates
-          if (!hasAnyDoorCandidate(ctx) || !checkWalkabilityOpt(ctx)) {
-            clearOccupancy(ctx, pi);
-            ctx.placements.pop();
-          } else {
-            placed++;
-            placementCount++;
-            keepGoing = true;
-
-            if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-              placeEfficiencyItems(ctx, fs);
-            }
-            if (ctx.relativeIndices.length > 0) {
-              placeRelativeItems(ctx, fs);
-            }
-          }
-        }
-      }
-    }
-
-    await yieldToUI();
-  }
-
-  // Pass 2 — Filler placement: fill gaps with smaller items
-  for (const gInfo of sortedGroups) {
-    const gi = gInfo.groupIdx;
-    const group = fs.groups[gi];
-    const maxPlacements = group.max ?? 100;
-
-    if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-      continue;
-    }
-
-    // Skip pure relative groups in filler pass too
-    if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) {
-      continue;
-    }
-
-    let placed = countGroupPlacements(ctx, gi);
-    if (placed >= maxPlacements) continue;
-
-    const rots = getAllowedRotations(group);
-
-    // Try filler items (smallest first) to fill remaining gaps
-    for (const ii of gInfo.fillerItems) {
-      if (placed >= maxPlacements) break;
-      let keepGoing = true;
-      while (keepGoing && placed < maxPlacements) {
-        keepGoing = false;
-        let bestPos = null;
-        let bestScore = -Infinity;
-        for (const rot of rots) {
-          for (const { r, c } of ctx.roomTiles) {
-            if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
-            const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-            if (posScore > bestScore) {
-              bestScore = posScore;
-              bestPos = { rot, row: r, col: c };
-            }
-          }
-        }
-        if (bestPos) {
-          const pi = ctx.placements.length;
-          ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: bestPos.rot, row: bestPos.row, col: bestPos.col });
-          setOccupancy(ctx, pi);
-
-          if (!hasAnyDoorCandidate(ctx) || !checkWalkabilityOpt(ctx)) {
-            clearOccupancy(ctx, pi);
-            ctx.placements.pop();
-          } else {
-            placed++;
-            keepGoing = true;
-
-            if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-              placeEfficiencyItems(ctx, fs);
-            }
-            if (ctx.relativeIndices.length > 0) {
-              placeRelativeItems(ctx, fs);
-            }
-          }
-        }
-      }
-    }
-
-    await yieldToUI();
-  }
-
-  // Final efficiency pass
-  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-    placeEfficiencyItems(ctx, fs);
-  }
-
-  // Final relative pass
-  if (ctx.relativeIndices.length > 0) {
-    placeRelativeItems(ctx, fs);
-  }
-}
-
-/** Place efficiency items until eff >= emp or no more can fit. */
-function placeEfficiencyItems(ctx, fs) {
   const stats = getStats(ctx);
+  if (ctx.effIdx < 0 || ctx.empIdx < 0) return;
   if (stats[ctx.effIdx] >= stats[ctx.empIdx]) return;
 
   for (const gInfo of ctx.groupInfo) {
@@ -1920,38 +1425,25 @@ function placeEfficiencyItems(ctx, fs) {
     const group = fs.groups[gi];
     const maxP = group.max ?? 100;
     let placed = countGroupPlacements(ctx, gi);
-
     const rots = getAllowedRotations(group);
-    // Rank items by efficiency density (highest first)
+
     const rankedItems = group.items.map((_, ii) => ({
-      ii,
-      density: getValueDensity(ctx, gi, ii),
+      ii, density: getValueDensity(ctx, gi, ii),
     })).sort((a, b) => b.density - a.density);
 
     for (const { ii } of rankedItems) {
       if (placed >= maxP) break;
       for (const rot of rots) {
         if (placed >= maxP) break;
-        // Find best position with furniture adjacency preference
-        let bestPos = null;
-        let bestScore = -Infinity;
+        let bestPos = null, bestScore = -Infinity;
         for (const { r, c } of ctx.roomTiles) {
+          if (ctx.occupancy[r][c] >= 0) continue;
           if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
           const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-          if (posScore > bestScore) {
-            bestScore = posScore;
-            bestPos = { rot, row: r, col: c };
-          }
+          if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
         }
         if (bestPos) {
-          const pi = ctx.placements.length;
-          ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: bestPos.rot, row: bestPos.row, col: bestPos.col });
-          setOccupancy(ctx, pi);
-
-          if (!hasAnyDoorCandidate(ctx) || !checkWalkabilityOpt(ctx)) {
-            clearOccupancy(ctx, pi);
-            ctx.placements.pop();
-          } else {
+          if (placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
             placed++;
             const st = getStats(ctx);
             if (st[ctx.effIdx] >= st[ctx.empIdx]) return;
@@ -1964,926 +1456,177 @@ function placeEfficiencyItems(ctx, fs) {
   }
 }
 
-/** Place relative-stat items until relVal >= primaryVal for all relative stats, or no more can fit. */
-function placeRelativeItems(ctx, fs) {
+function placeRelativeItems(ctx) {
+  const { furnitureSet: fs } = ctx;
   if (ctx.relativeIndices.length === 0) return;
   const stats = getStats(ctx);
   const primaryVal = stats[ctx.primaryStatIdx] ?? 0;
-  // Check if all relative stats already meet target
   let allMet = true;
-  for (const rel of ctx.relativeIndices) {
+  for (const rel of ctx.relativeIndices)
     if ((stats[rel.statIdx] ?? 0) < primaryVal) { allMet = false; break; }
-  }
   if (allMet) return;
 
   for (const gInfo of ctx.groupInfo) {
-    if (!gInfo.hasRelative) continue;
-    // Skip groups that also contribute primary stat — they're placed in the main loop
-    if (gInfo.hasPrimary) continue;
+    if (!gInfo.hasRelative || gInfo.hasPrimary) continue;
     const gi = gInfo.groupIdx;
     const group = fs.groups[gi];
     const maxP = group.max ?? 100;
     let placed = countGroupPlacements(ctx, gi);
-
     const rots = getAllowedRotations(group);
-    // Rank items by relative density (highest first)
+
     const rankedItems = group.items.map((_, ii) => ({
-      ii,
-      density: getValueDensity(ctx, gi, ii),
+      ii, density: getValueDensity(ctx, gi, ii),
     })).sort((a, b) => b.density - a.density);
 
     for (const { ii } of rankedItems) {
       if (placed >= maxP) break;
       for (const rot of rots) {
         if (placed >= maxP) break;
-        let bestPos = null;
-        let bestScore = -Infinity;
+        let bestPos = null, bestScore = -Infinity;
         for (const { r, c } of ctx.roomTiles) {
+          if (ctx.occupancy[r][c] >= 0) continue;
           if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
           const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-          if (posScore > bestScore) {
-            bestScore = posScore;
-            bestPos = { rot, row: r, col: c };
-          }
+          if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
         }
         if (bestPos) {
-          const pi = ctx.placements.length;
-          ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: bestPos.rot, row: bestPos.row, col: bestPos.col });
-          setOccupancy(ctx, pi);
-
-          if (!hasAnyDoorCandidate(ctx) || !checkWalkabilityOpt(ctx)) {
-            clearOccupancy(ctx, pi);
-            ctx.placements.pop();
-          } else {
+          if (placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
             placed++;
             const st = getStats(ctx);
             const pv = st[ctx.primaryStatIdx] ?? 0;
             let done = true;
-            for (const rel of ctx.relativeIndices) {
+            for (const rel of ctx.relativeIndices)
               if ((st[rel.statIdx] ?? 0) < pv) { done = false; break; }
-            }
             if (done) return;
           }
         }
       }
-      const st = getStats(ctx);
-      const pv = st[ctx.primaryStatIdx] ?? 0;
-      let done = true;
-      for (const rel of ctx.relativeIndices) {
-        if ((st[rel.statIdx] ?? 0) < pv) { done = false; break; }
-      }
-      if (done) return;
     }
   }
 }
 
-// ── Phase 2: Simulated Annealing ─────────────────────────
-
-// Move weights (Phase 2c: added SLIDE, rebalanced RELOCATE)
-const MOVE_WEIGHTS = {
-  RELOCATE: 15,
-  SLIDE: 20,
-  RESIZE: 15,
-  UPGRADE: 10,
-  ADD: 15,
-  REMOVE: 10,
-  SWAP: 5,
-  ROTATE: 5,
-  ERASE: 10,
-  ADD_ROOM: 5,
-};
-
-const MOVE_TYPES = Object.keys(MOVE_WEIGHTS);
-
-/** Phase 3e: Pick move type with dynamic weights based on packing density. */
-function pickMoveType(ctx) {
-  const roomTileCount = ctx.roomTiles.length;
-  const density = roomTileCount > 0 ? ctx.occupiedCount / roomTileCount : 0;
-
-  // Dynamic weights: adapt all move types based on packing density
-  let addW = MOVE_WEIGHTS.ADD;
-  let relocateW = MOVE_WEIGHTS.RELOCATE;
-  let slideW = MOVE_WEIGHTS.SLIDE;
-  let removeW = MOVE_WEIGHTS.REMOVE;
-  let rotateW = MOVE_WEIGHTS.ROTATE;
-  let eraseW = MOVE_WEIGHTS.ERASE;
-  let addRoomW = MOVE_WEIGHTS.ADD_ROOM;
-
-  if (density < 0.4) {
-    // Very sparse: focus on adding furniture, NOT shrinking room
-    addW = 35;
-    relocateW = 20;
-    slideW = 10;
-    removeW = 3;
-    eraseW = 1;     // near-zero: fill space first, trim later
-    addRoomW = 1;
-  } else if (density < 0.6) {
-    // Filling up: still favor adding, light trimming allowed
-    addW = 25;
-    eraseW = 5;
-    addRoomW = 2;
-  } else if (density > 0.8) {
-    // Very dense: fine-tune and trim edges
-    slideW = 30;
-    relocateW = 8;
-    rotateW = 12;
-    removeW = 15;
-    addW = 5;
-    eraseW = 12;
-  } else {
-    // Moderately dense (0.6-0.8): fine-tuning moves, moderate trimming
-    slideW = 25;
-    relocateW = 10;
-    rotateW = 10;
-    eraseW = 8;
-  }
-
-  const weights = {
-    ...MOVE_WEIGHTS,
-    ADD: addW, RELOCATE: relocateW, SLIDE: slideW, REMOVE: removeW,
-    ROTATE: rotateW, ERASE: eraseW, ADD_ROOM: addRoomW,
-  };
-  let totalWeight = 0;
-  for (const t of MOVE_TYPES) totalWeight += weights[t];
-
-  let r = ctx.rng() * totalWeight;
-  for (const type of MOVE_TYPES) {
-    r -= weights[type];
-    if (r <= 0) return type;
-  }
-  return "RELOCATE";
-}
-
-/** Gaussian random number (Box-Muller). */
-function gaussRand(rng, sigma) {
-  const u = 1 - rng();
-  const v = rng();
-  return sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
-
-async function simulatedAnnealing(ctx) {
-  // Rebuild groupCounts — constructive phase doesn't maintain them incrementally
-  rebuildGroupCounts(ctx);
-
-  const roomTileCount = ctx.roomTiles.length;
-  const budget = Math.min(30000, 8000 + Math.max(0, roomTileCount - 80) * 25);
-
-  const T_INITIAL = 500;
-  const T_FINAL = 0.1;
-  const COOL_RATE = 0.997;
-  const REHEAT_THRESHOLD = 150;
-  const REHEAT_FACTOR = 1.5;
-  const MAX_T_REHEAT = T_INITIAL * 0.5;
-
-  let T = T_INITIAL;
-  let bestScore = scoreLayoutSA(ctx);
-  ctx.bestSnapshot = takeSnapshot(ctx);
-  let currentScore = bestScore;
-  let consecutiveRejects = 0;
-  let lastBestStep = 0;
-
-  for (let step = 0; step < budget; step++) {
-    if (step % 50 === 0) await yieldToUI();
-    if (DEBUG_OPTIMIZER && step % 500 === 0) debugValidateState(ctx);
-
-    // Early termination: plateau detection
-    if (step - lastBestStep > 2000 && step > budget * 0.4) break;
-
-    // Reheat if stuck
-    if (consecutiveRejects >= REHEAT_THRESHOLD) {
-      T = Math.min(MAX_T_REHEAT, T * REHEAT_FACTOR);
-      consecutiveRejects = 0;
-    }
-
-    // Cool
-    T = Math.max(T_FINAL, T * COOL_RATE);
-
-    const move = generateMove(ctx);
-    if (!move) { consecutiveRejects++; continue; }
-
-    const applied = applyMove(ctx, move);
-    if (!applied) { consecutiveRejects++; continue; }
-
-    // Check hard constraints that can't be softened
-    const feasible = checkMoveConstraints(ctx, move);
-
-    if (feasible) {
-      const newScore = scoreLayoutSA(ctx);
-      const delta = newScore - currentScore;
-
-      if (delta > 0 || ctx.rng() < Math.exp(delta / T)) {
-        // Accept
-        currentScore = newScore;
-        consecutiveRejects = 0;
-
-        if (newScore > bestScore && passesHardConstraints(ctx)) {
-          bestScore = newScore;
-          ctx.bestSnapshot = takeSnapshot(ctx);
-          lastBestStep = step;
-        }
-      } else {
-        revertMove(ctx, move);
-        consecutiveRejects++;
-      }
-    } else {
-      revertMove(ctx, move);
-      consecutiveRejects++;
-    }
-  }
-
-  // Restore best
-  if (ctx.bestSnapshot) {
-    restoreSnapshot(ctx, ctx.bestSnapshot);
-  }
-}
-
-function passesHardConstraints(ctx) {
-  // Efficiency is a SOFT constraint — handled by scoring penalties, not hard rejection.
-  // This lets SA explore layouts that trade workers for efficiency.
-  if (!ctx._walkabilityValid && !checkWalkabilityOpt(ctx)) return false;
-  if (!checkStabilityOpt(ctx)) return false;
-  if (ctx.building.storage > 0 && ctx.placements.length > 0 && !hasStorageTile(ctx)) return false;
-  if (!hasAnyDoorCandidate(ctx)) return false;
-  // Group mins and maxes
-  const fs = ctx.furnitureSet;
-  for (let gi = 0; gi < fs.groups.length; gi++) {
-    const group = fs.groups[gi];
-    const count = countGroupPlacements(ctx, gi);
-    if (group.min > 0 && count < group.min) return false;
-    if (group.max != null && count > group.max) return false;
-  }
-  return true;
-}
-
-function checkMoveConstraints(ctx, move) {
-  // Walkability check — for all moves that change furniture or room geometry.
-  // ROTATE can turn blocking tiles, REMOVE can shift indices via swap.
-  if (move.type === "RELOCATE" || move.type === "SLIDE" || move.type === "RESIZE"
-      || move.type === "UPGRADE" || move.type === "ADD" || move.type === "SWAP"
-      || move.type === "ROTATE") {
-    if (!checkWalkabilityOpt(ctx)) return false;
-  }
-  if (move.type === "ERASE") {
-    if (!checkRoomConnectivity(ctx)) {
-      // Only auto-clean fragments when room is moderately filled —
-      // at low density, reject disconnecting erases to preserve room space
-      const eraseDensity = ctx.roomTiles.length > 0 ? ctx.occupiedCount / ctx.roomTiles.length : 0;
-      if (eraseDensity < 0.4 || !findAndCleanFragments(ctx, move)) return false;
-    }
-    if (!checkWalkabilityOpt(ctx)) return false;
-  }
-  if (move.type === "ADD_ROOM") {
-    if (!checkRoomConnectivity(ctx)) return false;
-  }
-  // Group max check for ADD
-  if (move.type === "ADD") {
-    const group = ctx.furnitureSet.groups[move.groupIdx];
-    if (group.max != null && countGroupPlacements(ctx, move.groupIdx) > group.max) return false;
-  }
-  // Group min check for REMOVE
-  if (move.type === "REMOVE") {
-    const group = ctx.furnitureSet.groups[move.groupIdx];
-    if (group.min > 0 && countGroupPlacements(ctx, move.groupIdx) < group.min) return false;
-  }
-  // Storage check
-  if (ctx.building.storage > 0 && ctx.placements.length > 0 && !hasStorageTile(ctx)) return false;
-  return true;
-}
-
-// ── Move generation ──────────────────────────────────────
-
-function generateMove(ctx) {
-  const type = pickMoveType(ctx);
-  const unlocked = ctx.placements.length - ctx.lockedCount;
-
-  switch (type) {
-    case "RELOCATE": return generateRelocate(ctx, unlocked);
-    case "SLIDE": return generateSlide(ctx, unlocked);
-    case "RESIZE": return generateResize(ctx, unlocked);
-    case "UPGRADE": return generateUpgrade(ctx, unlocked);
-    case "ADD": return generateAdd(ctx);
-    case "REMOVE": return generateRemove(ctx, unlocked);
-    case "SWAP": return generateSwap(ctx, unlocked);
-    case "ROTATE": return generateRotate(ctx, unlocked);
-    case "ERASE": return generateErase(ctx);
-    case "ADD_ROOM": return generateAddRoom(ctx);
-    default: return null;
-  }
-}
-
-function pickUnlocked(ctx, unlocked) {
-  if (unlocked <= 0) return -1;
-  return ctx.lockedCount + Math.floor(ctx.rng() * unlocked);
-}
-
-function generateRelocate(ctx, unlocked) {
-  const pi = pickUnlocked(ctx, unlocked);
-  if (pi < 0) return null;
-  const p = ctx.placements[pi];
-
-  const dr = Math.round(gaussRand(ctx.rng, 2));
-  const dc = Math.round(gaussRand(ctx.rng, 2));
-  if (dr === 0 && dc === 0) return null;
-
-  const newRow = p.row + dr;
-  const newCol = p.col + dc;
-
-  return {
-    type: "RELOCATE",
-    pi,
-    oldRow: p.row,
-    oldCol: p.col,
-    newRow,
-    newCol,
-  };
-}
-
-function generateSlide(ctx, unlocked) {
-  const pi = pickUnlocked(ctx, unlocked);
-  if (pi < 0) return null;
-  const p = ctx.placements[pi];
-
-  // Pick a random cardinal direction
-  const [dr, dc] = DIRS[Math.floor(ctx.rng() * 4)];
-  const newRow = p.row + dr;
-  const newCol = p.col + dc;
-
-  return {
-    type: "SLIDE",
-    pi,
-    oldRow: p.row,
-    oldCol: p.col,
-    newRow,
-    newCol,
-  };
-}
-
-function generateResize(ctx, unlocked) {
-  const pi = pickUnlocked(ctx, unlocked);
-  if (pi < 0) return null;
-  const p = ctx.placements[pi];
-  const group = ctx.furnitureSet.groups[p.groupIdx];
-  if (group.items.length <= 1) return null;
-  // Don't resize storage items — keep at minimum size
-  if (ctx.groupInfo[p.groupIdx]?.isStorage) return null;
-
-  let newItemIdx = p.itemIdx;
-  while (newItemIdx === p.itemIdx) {
-    newItemIdx = Math.floor(ctx.rng() * group.items.length);
-  }
-
-  return {
-    type: "RESIZE",
-    pi,
-    oldItemIdx: p.itemIdx,
-    newItemIdx,
-    groupIdx: p.groupIdx,
-  };
-}
-
-function generateUpgrade(ctx, unlocked) {
-  const pi = pickUnlocked(ctx, unlocked);
-  if (pi < 0) return null;
-  const p = ctx.placements[pi];
-  const group = ctx.furnitureSet.groups[p.groupIdx];
-  if (group.items.length <= 1) return null;
-  // Don't upgrade storage items during SA — handled in polish with stat checks
-  if (ctx.groupInfo[p.groupIdx]?.isStorage) return null;
-  // Try next larger variant (higher index = larger item typically)
-  const newItemIdx = p.itemIdx + 1;
-  if (newItemIdx >= group.items.length) return null;
-
-  return {
-    type: "UPGRADE",
-    pi,
-    oldItemIdx: p.itemIdx,
-    newItemIdx,
-    groupIdx: p.groupIdx,
-  };
-}
-
-function generateAdd(ctx) {
-  const fs = ctx.furnitureSet;
-  // Weighted selection by value density
-  const candidates = [];
-  let totalDensity = 0;
-
-  for (let gi = 0; gi < fs.groups.length; gi++) {
-    const group = fs.groups[gi];
-    const maxP = group.max ?? 100;
-    if (countGroupPlacements(ctx, gi) >= maxP) continue;
-
-    for (let ii = 0; ii < group.items.length; ii++) {
-      const d = Math.max(0.01, getValueDensity(ctx, gi, ii));
-      candidates.push({ gi, ii, density: d });
-      totalDensity += d;
-    }
-  }
-
-  if (candidates.length === 0) return null;
-
-  // Weighted random pick
-  let r = ctx.rng() * totalDensity;
-  let pick = candidates[0];
-  for (const c of candidates) {
-    r -= c.density;
-    if (r <= 0) { pick = c; break; }
-  }
-
-  // Pick from empty tiles only (targeted ADD)
-  const emptyTiles = ctx.roomTiles.filter(t => ctx.occupancy[t.r][t.c] < 0);
-  if (emptyTiles.length === 0) return null;
-  const pos = emptyTiles[Math.floor(ctx.rng() * emptyTiles.length)];
-  const rots = getAllowedRotations(fs.groups[pick.gi]);
-  const rot = rots[Math.floor(ctx.rng() * rots.length)];
-
-  return {
-    type: "ADD",
-    groupIdx: pick.gi,
-    itemIdx: pick.ii,
-    rotation: rot,
-    row: pos.r,
-    col: pos.c,
-  };
-}
-
-function generateRemove(ctx, unlocked) {
-  const pi = pickUnlocked(ctx, unlocked);
-  if (pi < 0) return null;
-  const p = ctx.placements[pi];
-
-  return {
-    type: "REMOVE",
-    pi,
-    groupIdx: p.groupIdx,
-    saved: { ...p },
-  };
-}
-
-function generateSwap(ctx, unlocked) {
-  if (unlocked < 2) return null;
-  const pi1 = pickUnlocked(ctx, unlocked);
-  let pi2 = pickUnlocked(ctx, unlocked);
-  let attempts = 0;
-  while (pi1 === pi2 && attempts < 10) {
-    pi2 = pickUnlocked(ctx, unlocked);
-    attempts++;
-  }
-  if (pi1 === pi2) return null;
-
-  return {
-    type: "SWAP",
-    pi1,
-    pi2,
-    oldRow1: ctx.placements[pi1].row,
-    oldCol1: ctx.placements[pi1].col,
-    oldRow2: ctx.placements[pi2].row,
-    oldCol2: ctx.placements[pi2].col,
-  };
-}
-
-function generateRotate(ctx, unlocked) {
-  const pi = pickUnlocked(ctx, unlocked);
-  if (pi < 0) return null;
-  const p = ctx.placements[pi];
-  const group = ctx.furnitureSet.groups[p.groupIdx];
-  const allowed = getAllowedRotations(group);
-  if (allowed.length <= 1) return null;
-
-  let newRot = p.rotation;
-  while (newRot === p.rotation) {
-    newRot = allowed[Math.floor(ctx.rng() * allowed.length)];
-  }
-
-  return {
-    type: "ROTATE",
-    pi,
-    oldRotation: p.rotation,
-    newRotation: newRot,
-  };
-}
-
-function generateErase(ctx) {
-  // Find ANY unoccupied room tile (edge or interior) — unified trim + support pillar
-  const candidates = [];
-  const { gridW, gridH, room, occupancy } = ctx;
-
-  // Compute centroid
-  let cr = 0, cc = 0, cnt = 0;
-  for (const t of ctx.roomTiles) { cr += t.r; cc += t.c; cnt++; }
-  if (cnt === 0) return null;
-  cr /= cnt; cc /= cnt;
-
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (!room[r][c]) continue;
-      if (occupancy[r][c] >= 0) continue;
-
-      let isEdge = false;
-      for (const [dr, dc] of DIRS) {
-        const nr = r + dr, nc = c + dc;
-        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !room[nr][nc]) {
-          isEdge = true; break;
-        }
-      }
-
-      // Weight: edge tiles by distance from centroid, interior tiles near unstable zones higher
-      const dist = Math.abs(r - cr) + Math.abs(c - cc);
-      let weight = isEdge ? dist : 0.5;
-
-      // Boost weight for tiles near unstable zones (support pillar candidates)
-      if (!isEdge && ctx.furnitureSet.mustBeIndoors) {
-        let nearUnstable = false;
-        for (const [dr, dc] of DIRS8) {
-          const nr = r + dr, nc = c + dc;
-          if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && room[nr][nc]) {
-            if (tileSupport(room, gridW, gridH, nr, nc) < 1.0) {
-              nearUnstable = true; break;
-            }
-          }
-        }
-        if (nearUnstable) weight = dist + 10; // strongly prefer these
-      }
-
-      candidates.push({ r, c, weight });
-    }
-  }
-
-  if (candidates.length === 0) return null;
-  // Weighted random pick (higher weight = more likely)
-  candidates.sort((a, b) => b.weight - a.weight);
-  const pick = candidates[Math.floor(ctx.rng() * Math.min(8, candidates.length))];
-
-  return {
-    type: "ERASE",
-    row: pick.r,
-    col: pick.c,
-  };
-}
-
-function generateAddRoom(ctx) {
-  // Re-add a previously erased tile (non-room tile adjacent to room)
-  const candidates = [];
-  const { gridW, gridH, room } = ctx;
-
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (room[r][c]) continue;
-      // Must be adjacent to at least one room tile
-      let adjRoom = false;
-      for (const [dr, dc] of DIRS) {
-        const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && room[nr][nc]) {
-          adjRoom = true; break;
-        }
-      }
-      if (adjRoom) candidates.push({ r, c });
-    }
-  }
-
-  if (candidates.length === 0) return null;
-  const pick = candidates[Math.floor(ctx.rng() * candidates.length)];
-
-  return {
-    type: "ADD_ROOM",
-    row: pick.r,
-    col: pick.c,
-  };
-}
-
-// ── Move application ─────────────────────────────────────
-
-function applyMove(ctx, move) {
-  switch (move.type) {
-    case "SLIDE":
-    case "RELOCATE": {
-      const p = ctx.placements[move.pi];
-      clearOccupancy(ctx, move.pi);
-      p.row = move.newRow;
-      p.col = move.newCol;
-      // Check bounds
-      const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-      for (let r = 0; r < tiles.length; r++) {
-        for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-          if (tiles[r][c] === null) continue;
-          const gr = p.row + r, gc = p.col + c;
-          if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) {
-            // Revert position
-            p.row = move.oldRow;
-            p.col = move.oldCol;
-            setOccupancy(ctx, move.pi);
-            return false;
-          }
-          if (ctx.occupancy[gr][gc] >= 0 && ctx.occupancy[gr][gc] !== move.pi) {
-            p.row = move.oldRow;
-            p.col = move.oldCol;
-            setOccupancy(ctx, move.pi);
-            return false;
-          }
-        }
-      }
-      setOccupancy(ctx, move.pi);
-      return true;
-    }
-
-    case "RESIZE":
-    case "UPGRADE": {
-      const p = ctx.placements[move.pi];
-      clearOccupancy(ctx, move.pi);
-      const oldItemIdx = p.itemIdx;
-      p.itemIdx = move.newItemIdx;
-      // Check if fits
-      const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-      for (let r = 0; r < tiles.length; r++) {
-        for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-          if (tiles[r][c] === null) continue;
-          const gr = p.row + r, gc = p.col + c;
-          if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) {
-            p.itemIdx = oldItemIdx;
-            setOccupancy(ctx, move.pi);
-            return false;
-          }
-          if (ctx.occupancy[gr][gc] >= 0 && ctx.occupancy[gr][gc] !== move.pi) {
-            p.itemIdx = oldItemIdx;
-            setOccupancy(ctx, move.pi);
-            return false;
-          }
-        }
-      }
-      setOccupancy(ctx, move.pi);
-      return true;
-    }
-
-    case "ADD": {
-      const pi = ctx.placements.length;
-      ctx.placements.push({
-        groupIdx: move.groupIdx,
-        itemIdx: move.itemIdx,
-        rotation: move.rotation,
-        row: move.row,
-        col: move.col,
-      });
-      move.pi = pi;
-      // Check if fits
-      const tiles = getCachedTiles(ctx, move.groupIdx, move.itemIdx, move.rotation);
-      for (let r = 0; r < tiles.length; r++) {
-        for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-          if (tiles[r][c] === null) continue;
-          const gr = move.row + r, gc = move.col + c;
-          if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) {
-            ctx.placements.pop();
-            return false;
-          }
-          if (ctx.occupancy[gr][gc] >= 0) {
-            ctx.placements.pop();
-            return false;
-          }
-        }
-      }
-      setOccupancy(ctx, pi);
-      if (ctx.groupCounts) ctx.groupCounts[move.groupIdx]++;
-      return true;
-    }
-
-    case "REMOVE": {
-      clearOccupancy(ctx, move.pi);
-      if (ctx.groupCounts) ctx.groupCounts[move.groupIdx]--;
-      // Swap with last for O(1) removal
-      const lastIdx = ctx.placements.length - 1;
-      if (move.pi !== lastIdx) {
-        clearOccupancy(ctx, lastIdx);
-        const tmp = ctx.placements[move.pi];
-        ctx.placements[move.pi] = ctx.placements[lastIdx];
-        ctx.placements[lastIdx] = tmp;
-        move.swappedFrom = lastIdx;
-        setOccupancy(ctx, move.pi);
-      }
-      ctx.placements.pop();
-      return true;
-    }
-
-    case "SWAP": {
-      const p1 = ctx.placements[move.pi1];
-      const p2 = ctx.placements[move.pi2];
-      clearOccupancy(ctx, move.pi1);
-      clearOccupancy(ctx, move.pi2);
-      // Exchange positions
-      const tmpRow = p1.row, tmpCol = p1.col;
-      p1.row = p2.row; p1.col = p2.col;
-      p2.row = tmpRow; p2.col = tmpCol;
-      // Check both fit
-      const t1 = getCachedTiles(ctx, p1.groupIdx, p1.itemIdx, p1.rotation);
-      const t2 = getCachedTiles(ctx, p2.groupIdx, p2.itemIdx, p2.rotation);
-      let ok = true;
-      for (let r = 0; r < t1.length && ok; r++) {
-        for (let c = 0; c < (t1[r]?.length ?? 0) && ok; c++) {
-          if (t1[r][c] === null) continue;
-          const gr = p1.row + r, gc = p1.col + c;
-          if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) ok = false;
-        }
-      }
-      for (let r = 0; r < t2.length && ok; r++) {
-        for (let c = 0; c < (t2[r]?.length ?? 0) && ok; c++) {
-          if (t2[r][c] === null) continue;
-          const gr = p2.row + r, gc = p2.col + c;
-          if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) ok = false;
-        }
-      }
-      if (!ok) {
-        p2.row = p1.row; p2.col = p1.col;
-        p1.row = move.oldRow1; p1.col = move.oldCol1;
-        p2.row = move.oldRow2; p2.col = move.oldCol2;
-        setOccupancy(ctx, move.pi1);
-        setOccupancy(ctx, move.pi2);
-        return false;
-      }
-      setOccupancy(ctx, move.pi1);
-      // Check overlap with p2 after p1 is set
-      const t2Check = getCachedTiles(ctx, p2.groupIdx, p2.itemIdx, p2.rotation);
-      for (let r = 0; r < t2Check.length; r++) {
-        for (let c = 0; c < (t2Check[r]?.length ?? 0); c++) {
-          if (t2Check[r][c] === null) continue;
-          const gr = p2.row + r, gc = p2.col + c;
-          if (gr >= 0 && gr < ctx.gridH && gc >= 0 && gc < ctx.gridW) {
-            if (ctx.occupancy[gr][gc] >= 0 && ctx.occupancy[gr][gc] !== move.pi2) {
-              // Overlap — revert
-              clearOccupancy(ctx, move.pi1);
-              p1.row = move.oldRow1; p1.col = move.oldCol1;
-              p2.row = move.oldRow2; p2.col = move.oldCol2;
-              setOccupancy(ctx, move.pi1);
-              setOccupancy(ctx, move.pi2);
-              return false;
-            }
-          }
-        }
-      }
-      setOccupancy(ctx, move.pi2);
-      return true;
-    }
-
-    case "ROTATE": {
-      const p = ctx.placements[move.pi];
-      clearOccupancy(ctx, move.pi);
-      p.rotation = move.newRotation;
-      const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-      for (let r = 0; r < tiles.length; r++) {
-        for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
-          if (tiles[r][c] === null) continue;
-          const gr = p.row + r, gc = p.col + c;
-          if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) {
-            p.rotation = move.oldRotation;
-            setOccupancy(ctx, move.pi);
-            return false;
-          }
-          if (ctx.occupancy[gr][gc] >= 0 && ctx.occupancy[gr][gc] !== move.pi) {
-            p.rotation = move.oldRotation;
-            setOccupancy(ctx, move.pi);
-            return false;
-          }
-        }
-      }
-      setOccupancy(ctx, move.pi);
-      return true;
-    }
-
-    case "ERASE": {
-      removeRoomTile(ctx, move.row, move.col);
-      return true;
-    }
-
-    case "ADD_ROOM": {
-      restoreRoomTile(ctx, move.row, move.col);
-      return true;
-    }
-
-    default: return false;
-  }
-}
-
-// ── Move reversion ───────────────────────────────────────
-
-function revertMove(ctx, move) {
-  switch (move.type) {
-    case "SLIDE":
-    case "RELOCATE": {
-      const p = ctx.placements[move.pi];
-      clearOccupancy(ctx, move.pi);
-      p.row = move.oldRow;
-      p.col = move.oldCol;
-      setOccupancy(ctx, move.pi);
-      break;
-    }
-
-    case "RESIZE":
-    case "UPGRADE": {
-      const p = ctx.placements[move.pi];
-      clearOccupancy(ctx, move.pi);
-      p.itemIdx = move.oldItemIdx;
-      setOccupancy(ctx, move.pi);
-      break;
-    }
-
-    case "ADD": {
-      clearOccupancy(ctx, move.pi);
-      if (ctx.groupCounts) ctx.groupCounts[move.groupIdx]--;
-      ctx.placements.pop();
-      break;
-    }
-
-    case "REMOVE": {
-      // Re-add: push saved placement
-      if (ctx.groupCounts) ctx.groupCounts[move.groupIdx]++;
-      ctx.placements.push(move.saved);
-      const newPi = ctx.placements.length - 1;
-      // If we swapped during removal, swap back
-      if (move.swappedFrom !== undefined) {
-        const tmp = ctx.placements[move.pi];
-        ctx.placements[move.pi] = ctx.placements[newPi];
-        ctx.placements[newPi] = tmp;
-        // After the swap: placements[move.pi] = removed piece (was at -1 in occ grid)
-        //                  placements[newPi] = swapped piece (occ grid still says move.pi)
-        // Re-index the swapped piece's occupancy from move.pi → newPi (no blockerCount change)
-        const pieceL = ctx.placements[newPi];
-        const tilesL = getCachedTiles(ctx, pieceL.groupIdx, pieceL.itemIdx, pieceL.rotation);
-        for (let r = 0; r < tilesL.length; r++) {
-          for (let c = 0; c < (tilesL[r]?.length ?? 0); c++) {
-            if (tilesL[r][c] === null) continue;
-            const gr = pieceL.row + r, gc = pieceL.col + c;
-            if (gr >= 0 && gr < ctx.gridH && gc >= 0 && gc < ctx.gridW) {
-              ctx.occupancy[gr][gc] = newPi;
-            }
-          }
-        }
-        // Set the restored piece's occupancy + blockerCount (was cleared during apply)
-        setOccupancy(ctx, move.pi);
-      } else {
-        setOccupancy(ctx, newPi);
-      }
-      break;
-    }
-
-    case "SWAP": {
-      const p1 = ctx.placements[move.pi1];
-      const p2 = ctx.placements[move.pi2];
-      clearOccupancy(ctx, move.pi1);
-      clearOccupancy(ctx, move.pi2);
-      p1.row = move.oldRow1; p1.col = move.oldCol1;
-      p2.row = move.oldRow2; p2.col = move.oldCol2;
-      setOccupancy(ctx, move.pi1);
-      setOccupancy(ctx, move.pi2);
-      break;
-    }
-
-    case "ROTATE": {
-      const p = ctx.placements[move.pi];
-      clearOccupancy(ctx, move.pi);
-      p.rotation = move.oldRotation;
-      setOccupancy(ctx, move.pi);
-      break;
-    }
-
-    case "ERASE": {
-      // Restore auto-cleaned fragment tiles first
-      if (move.autoCleanedTiles) {
-        for (const { r, c } of move.autoCleanedTiles) {
-          restoreRoomTile(ctx, r, c);
-        }
-      }
-      restoreRoomTile(ctx, move.row, move.col);
-      break;
-    }
-
-    case "ADD_ROOM": {
-      removeRoomTile(ctx, move.row, move.col);
-      break;
-    }
-  }
-}
-
-// ── Phase 2.5: Post-SA Polish ─────────────────────────────
-
-async function polishPhase(ctx) {
-  // Rebuild groupCounts — SA snapshot restore doesn't maintain them through polish
-  rebuildGroupCounts(ctx);
-
+/** Place mandatory group items (min > 0) and storage. */
+function placeMandatoryItems(ctx) {
   const { furnitureSet: fs } = ctx;
+  for (const gInfo of ctx.groupInfo) {
+    const gi = gInfo.groupIdx;
+    const group = fs.groups[gi];
+    if (group.min <= 0 && !gInfo.isStorage) continue;
+    // Skip if already placed
+    if (countGroupPlacements(ctx, gi) >= (group.min || 1)) continue;
 
-  // Sub-pass A: Upgrade — try replacing each item with a larger variant
-  // Phase 3d: Also try shifting ±1 tile to accommodate larger variants
+    const rots = getAllowedRotations(group);
+    // Use smallest item for mandatory placements
+    const items = [...group.items.keys()].sort((a, b) => countItemTiles(group.items[a]) - countItemTiles(group.items[b]));
+
+    for (const ii of items) {
+      if (countGroupPlacements(ctx, gi) >= (group.min || 1)) break;
+      for (const rot of rots) {
+        if (countGroupPlacements(ctx, gi) >= (group.min || 1)) break;
+        let bestPos = null, bestScore = -Infinity;
+        for (const { r, c } of ctx.roomTiles) {
+          if (ctx.occupancy[r][c] >= 0) continue;
+          if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
+          const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
+          if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+        }
+        if (bestPos) placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col);
+      }
+    }
+  }
+}
+
+function scorePlacementPosition(ctx, gi, ii, rot, r, c) {
+  let posScore = getValueDensity(ctx, gi, ii);
+  const tiles = getCachedTiles(ctx, gi, ii, rot);
+  const fs = ctx.furnitureSet;
+  let wallAdj = 0, cornerAdj = 0, furnitureAdj = 0, facingBonus = 0;
+  for (let tr = 0; tr < tiles.length; tr++)
+    for (let tc = 0; tc < (tiles[tr]?.length ?? 0); tc++) {
+      if (tiles[tr][tc] === null) continue;
+      const gr = r + tr, gc = c + tc;
+      let tileWallCount = 0;
+      for (const [dr, dc] of DIRS) {
+        const nr = gr + dr, nc = gc + dc;
+        if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) {
+          wallAdj++;
+          tileWallCount++;
+        } else if (ctx.occupancy[nr][nc] >= 0) furnitureAdj++;
+      }
+      if (tileWallCount >= 2) cornerAdj++;
+
+      // Neatness: blocker against wall is good, MR facing existing MR across 1-tile gap is good
+      const tileKey = tiles[tr][tc];
+      const tt = fs.tileTypes[tileKey];
+      const isBlocking = tt && AVAIL_BLOCKING.has(tt.availability);
+      const isMR = tt?.mustBeReachable;
+      if (isBlocking && !isMR && tileWallCount > 0) facingBonus += tileWallCount;
+      if (isMR && tileWallCount > 0) facingBonus -= 0.5 * tileWallCount;
+      if (isMR) {
+        for (const [dr, dc] of DIRS) {
+          const nr2 = gr + dr * 2, nc2 = gc + dc * 2;
+          if (nr2 >= 0 && nr2 < ctx.gridH && nc2 >= 0 && nc2 < ctx.gridW
+              && ctx.mustReachGrid[nr2 * ctx.gridW + nc2] === 1) {
+            const nr1 = gr + dr, nc1 = gc + dc;
+            if (nr1 >= 0 && nr1 < ctx.gridH && nc1 >= 0 && nc1 < ctx.gridW
+                && ctx.room[nr1][nc1] && ctx.blockerCount[nr1][nc1] === 0
+                && ctx.occupancy[nr1][nc1] < 0) {
+              facingBonus += 2.5;
+            }
+          }
+        }
+      }
+    }
+  return posScore + wallAdj * 3.0 + furnitureAdj + cornerAdj * 1.5 + facingBonus;
+}
+
+// ══════════════════════════════════════════════════════════
+// Phase 4: Local Search Polish (hill-climbing)
+// ══════════════════════════════════════════════════════════
+
+function scoreLayout(ctx) {
+  const stats = getStats(ctx);
+  const primary = stats[ctx.primaryStatIdx] ?? 0;
+
+  let effBonus = 0, effPenalty = 0;
+  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
+    const emp = stats[ctx.empIdx] ?? 0;
+    const eff = stats[ctx.effIdx] ?? 0;
+    effBonus = Math.min(eff, emp) * 10000;
+    if (eff < emp) { const d = emp - eff; effPenalty = d * d * 1000; }
+  }
+
+  let relBonus = 0, relPenalty = 0;
+  for (const rel of ctx.relativeIndices) {
+    const pv = stats[ctx.primaryStatIdx] ?? 0;
+    const rv = stats[rel.statIdx] ?? 0;
+    relBonus += Math.min(rv, pv) * 500;
+    if (rv < pv) { const d = pv - rv; relPenalty += d * d * 200; }
+  }
+
+  const roomTileCount = ctx.roomTiles.length;
+  const occupied = ctx.occupiedCount;
+  const packingBonus = (occupied / Math.max(1, roomTileCount)) * 200;
+
+  return primary * 1000 + effBonus + relBonus + packingBonus - effPenalty - relPenalty;
+}
+
+async function localSearchPhase(ctx) {
+  const { furnitureSet: fs } = ctx;
+  rebuildGroupCounts(ctx);
+
+  // Sub-pass A: Upgrade — try replacing each item with a larger variant (+ shift offsets)
   const SHIFT_OFFSETS = [[0,0],[0,1],[0,-1],[1,0],[-1,0]];
   for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
     const p = ctx.placements[pi];
     const group = fs.groups[p.groupIdx];
     if (group.items.length <= 1) continue;
-
-    const currentScore = scoreLayoutSA(ctx);
+    const gInfo = ctx.groupInfo[p.groupIdx];
+    const preStats = gInfo?.isStorage ? getStats(ctx) : null;
+    const currentScore = scoreLayout(ctx);
     const origRow = p.row, origCol = p.col;
     let upgraded = false;
-    const gInfo = ctx.groupInfo[p.groupIdx];
-    // For storage groups, capture stats before upgrade to ensure no regression
-    const preStats = gInfo?.isStorage ? getStats(ctx) : null;
 
-    // Try progressively larger items
     for (let newII = p.itemIdx + 1; newII < group.items.length && !upgraded; newII++) {
       for (const [sr, sc] of SHIFT_OFFSETS) {
         clearOccupancy(ctx, pi);
@@ -2894,29 +1637,23 @@ async function polishPhase(ctx) {
 
         const tiles = getCachedTiles(ctx, p.groupIdx, newII, p.rotation);
         let fits = true;
-        for (let r = 0; r < tiles.length && fits; r++) {
+        for (let r = 0; r < tiles.length && fits; r++)
           for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
             if (tiles[r][c] === null) continue;
             const gr = p.row + r, gc = p.col + c;
             if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
             else if (ctx.occupancy[gr][gc] >= 0) fits = false;
           }
-        }
 
         if (fits) {
           setOccupancy(ctx, pi);
-          let accept = checkWalkabilityOpt(ctx) && scoreLayoutSA(ctx) > currentScore
-              && hasAnyDoorCandidate(ctx);
-          // Storage upgrade: only if employees and efficiency don't decrease
+          let accept = checkWalkabilityOpt(ctx) && scoreLayout(ctx) > currentScore && hasAnyDoorCandidate(ctx);
           if (accept && preStats) {
             const postStats = getStats(ctx);
             if (ctx.empIdx >= 0 && postStats[ctx.empIdx] < preStats[ctx.empIdx]) accept = false;
             if (ctx.effIdx >= 0 && postStats[ctx.effIdx] < preStats[ctx.effIdx]) accept = false;
           }
-          if (accept) {
-            upgraded = true;
-            break; // keep upgrade
-          }
+          if (accept) { upgraded = true; break; }
           clearOccupancy(ctx, pi);
         }
 
@@ -2930,27 +1667,20 @@ async function polishPhase(ctx) {
 
   await yieldToUI();
 
-  // Sub-pass A2: Greedy squeeze — slide pieces toward centroid to consolidate space
+  // Sub-pass B: Greedy squeeze — slide pieces toward centroid
   for (let round = 0; round < 3; round++) {
-    // Compute centroid of all placements
     let centR = 0, centC = 0, centN = 0;
     for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
-      const p = ctx.placements[pi];
-      centR += p.row;
-      centC += p.col;
-      centN++;
+      centR += ctx.placements[pi].row; centC += ctx.placements[pi].col; centN++;
     }
     if (centN === 0) break;
-    centR /= centN;
-    centC /= centN;
+    centR /= centN; centC /= centN;
 
     let anyMoved = false;
-    const currentScore = scoreLayoutSA(ctx);
-
+    const currentScore = scoreLayout(ctx);
     for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
       const p = ctx.placements[pi];
-      const dr = Math.sign(centR - p.row);
-      const dc = Math.sign(centC - p.col);
+      const dr = Math.sign(centR - p.row), dc = Math.sign(centC - p.col);
       if (dr === 0 && dc === 0) continue;
 
       const shifts = [];
@@ -2961,32 +1691,27 @@ async function polishPhase(ctx) {
       for (const [sr, sc] of shifts) {
         clearOccupancy(ctx, pi);
         const origRow = p.row, origCol = p.col;
-        p.row += sr;
-        p.col += sc;
+        p.row += sr; p.col += sc;
 
         const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
         let fits = true;
-        for (let r = 0; r < tiles.length && fits; r++) {
+        for (let r = 0; r < tiles.length && fits; r++)
           for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
             if (tiles[r][c] === null) continue;
             const gr = p.row + r, gc = p.col + c;
             if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
             else if (ctx.occupancy[gr][gc] >= 0) fits = false;
           }
-        }
 
         if (fits) {
           setOccupancy(ctx, pi);
-          const newScore = scoreLayoutSA(ctx);
-          if (newScore >= currentScore && checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx)) {
-            anyMoved = true;
-            break; // keep this shift
+          if (scoreLayout(ctx) >= currentScore && checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx)) {
+            anyMoved = true; break;
           }
           clearOccupancy(ctx, pi);
         }
 
-        p.row = origRow;
-        p.col = origCol;
+        p.row = origRow; p.col = origCol;
         setOccupancy(ctx, pi);
       }
     }
@@ -2995,139 +1720,101 @@ async function polishPhase(ctx) {
 
   await yieldToUI();
 
-  // Sub-pass A3: Neatness rotation+shift — try rotating and shifting each piece to improve
-  // walkable-sharing. Uses dedicated neatness scoring with full weights. Primary stat must not decrease.
-  // Runs multiple rounds since rotating one piece may enable better orientations for neighbors.
-  {
-    const A3_SHIFTS = [[0,0],[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
-    for (let round = 0; round < 3; round++) {
-      let anyChanged = false;
-      const preStats = getStats(ctx);
-      const prePrimary = preStats[ctx.primaryStatIdx] ?? 0;
-      const preEff = ctx.effIdx >= 0 ? (preStats[ctx.effIdx] ?? 0) : -1;
+  // Sub-pass C: Neatness rotation+shift — try rotating each piece
+  const A3_SHIFTS = [[0,0],[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
+  for (let round = 0; round < 3; round++) {
+    let anyChanged = false;
+    const preStats = getStats(ctx);
+    const prePrimary = preStats[ctx.primaryStatIdx] ?? 0;
+    const preEff = ctx.effIdx >= 0 ? (preStats[ctx.effIdx] ?? 0) : -1;
 
-      for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
-        const p = ctx.placements[pi];
-        const group = fs.groups[p.groupIdx];
-        const rots = getAllowedRotations(group);
+    for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
+      const p = ctx.placements[pi];
+      const group = fs.groups[p.groupIdx];
+      const rots = getAllowedRotations(group);
+      if (rots.length <= 1) continue;
 
-        const origRot = p.rotation, origRow = p.row, origCol = p.col;
-        const currentNeatness = computeLocalNeatness(ctx, pi);
-        let bestRot = origRot, bestRow = origRow, bestCol = origCol;
-        let bestNeatness = currentNeatness;
+      const origRot = p.rotation, origRow = p.row, origCol = p.col;
+      let bestRot = origRot, bestRow = origRow, bestCol = origCol;
+      let bestScore = scoreLayout(ctx);
 
-        clearOccupancy(ctx, pi);
+      clearOccupancy(ctx, pi);
+      for (const rot of rots) {
+        for (const [sr, sc] of A3_SHIFTS) {
+          if (rot === origRot && sr === 0 && sc === 0) continue;
+          p.rotation = rot; p.row = origRow + sr; p.col = origCol + sc;
 
-        for (const rot of rots) {
-          for (const [sr, sc] of A3_SHIFTS) {
-            if (rot === origRot && sr === 0 && sc === 0) continue;
-            p.rotation = rot;
-            p.row = origRow + sr;
-            p.col = origCol + sc;
-
-            const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, rot);
-            let fits = true;
-            for (let r = 0; r < tiles.length && fits; r++) {
-              for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
-                if (tiles[r][c] === null) continue;
-                const gr = p.row + r, gc = p.col + c;
-                if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
-                else if (ctx.occupancy[gr][gc] >= 0) fits = false;
-              }
+          const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, rot);
+          let fits = true;
+          for (let r = 0; r < tiles.length && fits; r++)
+            for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+              if (tiles[r][c] === null) continue;
+              const gr = p.row + r, gc = p.col + c;
+              if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
+              else if (ctx.occupancy[gr][gc] >= 0) fits = false;
             }
 
-            if (fits) {
-              setOccupancy(ctx, pi);
-              const postStats = getStats(ctx);
-              const postPrimary = postStats[ctx.primaryStatIdx] ?? 0;
-              const postEff = ctx.effIdx >= 0 ? (postStats[ctx.effIdx] ?? 0) : -1;
-              if (postPrimary >= prePrimary && postEff >= preEff
-                  && checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx)) {
-                const neatness = computeLocalNeatness(ctx, pi);
-                if (neatness > bestNeatness) {
-                  bestRot = rot;
-                  bestRow = p.row;
-                  bestCol = p.col;
-                  bestNeatness = neatness;
-                }
+          if (fits) {
+            setOccupancy(ctx, pi);
+            const postStats = getStats(ctx);
+            const postPrimary = postStats[ctx.primaryStatIdx] ?? 0;
+            const postEff = ctx.effIdx >= 0 ? (postStats[ctx.effIdx] ?? 0) : -1;
+            if (postPrimary >= prePrimary && postEff >= preEff
+                && checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx)) {
+              const sc2 = scoreLayout(ctx);
+              if (sc2 > bestScore) {
+                bestRot = rot; bestRow = p.row; bestCol = p.col; bestScore = sc2;
               }
-              clearOccupancy(ctx, pi);
             }
+            clearOccupancy(ctx, pi);
           }
         }
-
-        // Apply best configuration
-        p.rotation = bestRot;
-        p.row = bestRow;
-        p.col = bestCol;
-        setOccupancy(ctx, pi);
-        if (bestRot !== origRot || bestRow !== origRow || bestCol !== origCol) {
-          anyChanged = true;
-        }
       }
-      if (!anyChanged) break;
+
+      p.rotation = bestRot; p.row = bestRow; p.col = bestCol;
+      setOccupancy(ctx, pi);
+      if (bestRot !== origRot || bestRow !== origRow || bestCol !== origCol) anyChanged = true;
     }
+    if (!anyChanged) break;
   }
 
   await yieldToUI();
 
-  // Sub-pass B: Gap-fill — place small items in empty spaces
+  // Sub-pass D: Gap fill with small items
   for (let pass = 0; pass < 3; pass++) {
     let filled = false;
     for (const gInfo of ctx.groupInfo) {
-      // Skip pure efficiency groups — handled by sub-pass C
-      if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-        continue;
-      }
-      // Skip pure relative groups — handled by sub-pass D
-      if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) {
-        continue;
-      }
-
+      if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) continue;
+      if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) continue;
       const gi = gInfo.groupIdx;
       const group = fs.groups[gi];
       const maxP = group.max ?? 100;
       if (countGroupPlacements(ctx, gi) >= maxP) continue;
-
       const rots = getAllowedRotations(group);
-      // Use fillerItems (smallest first), then heroItems
       const candidates = [...gInfo.fillerItems, ...gInfo.heroItems];
 
       for (const ii of candidates) {
         if (countGroupPlacements(ctx, gi) >= maxP) break;
-
-        let bestPos = null;
-        let bestScore = -Infinity;
-        const currentScore = scoreLayoutSA(ctx);
-
+        const currentScore = scoreLayout(ctx);
+        let bestPos = null, bestScore = currentScore;
         for (const rot of rots) {
           for (const { r, c } of ctx.roomTiles) {
             if (ctx.occupancy[r][c] >= 0) continue;
             if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
             const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-            if (posScore > bestScore) {
-              bestScore = posScore;
-              bestPos = { rot, row: r, col: c };
-            }
+            if (posScore > bestScore - currentScore) { bestScore = currentScore + posScore; bestPos = { rot, row: r, col: c }; }
           }
         }
-
         if (bestPos) {
           const pi = ctx.placements.length;
           ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: bestPos.rot, row: bestPos.row, col: bestPos.col });
           setOccupancy(ctx, pi);
           if (ctx.groupCounts) ctx.groupCounts[gi]++;
-
-          const ok = checkWalkabilityOpt(ctx)
-            && scoreLayoutSA(ctx) > currentScore
-            && hasAnyDoorCandidate(ctx);
-          if (!ok) {
+          if (!checkWalkabilityOpt(ctx) || !hasAnyDoorCandidate(ctx) || scoreLayout(ctx) <= currentScore) {
             clearOccupancy(ctx, pi);
             if (ctx.groupCounts) ctx.groupCounts[gi]--;
             ctx.placements.pop();
-          } else {
-            filled = true;
-          }
+          } else { filled = true; }
         }
       }
     }
@@ -3135,457 +1822,467 @@ async function polishPhase(ctx) {
     await yieldToUI();
   }
 
-  // Sub-pass C: Final efficiency rebalance
-  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) {
-    placeEfficiencyItems(ctx, ctx.furnitureSet);
+  // Sub-pass E: Remove-and-repack — try removing small items to make room for bigger ones
+  for (let round = 0; round < 3; round++) {
+    let anyImproved = false;
+    const preScore = scoreLayout(ctx);
+    const snap = takeSnapshot(ctx);
+
+    // Collect primary-stat items sorted by contribution (smallest first = best to remove)
+    const primaryItems = [];
+    for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
+      const p = ctx.placements[pi];
+      const gInfo = ctx.groupInfo[p.groupIdx];
+      if (!gInfo?.hasPrimary) continue;
+      const item = fs.groups[p.groupIdx]?.items[p.itemIdx];
+      if (!item) continue;
+      const mult = item.multiplierStats ?? item.multiplier;
+      primaryItems.push({ pi, mult });
+    }
+    primaryItems.sort((a, b) => a.mult - b.mult);
+
+    // Try removing the smallest items and refilling
+    for (const { pi } of primaryItems.slice(0, Math.min(5, primaryItems.length))) {
+      const removedP = { ...ctx.placements[pi] };
+      clearOccupancy(ctx, pi);
+      // Move last placement into slot pi
+      const lastPi = ctx.placements.length - 1;
+      if (pi !== lastPi) {
+        clearOccupancy(ctx, lastPi);
+        ctx.placements[pi] = ctx.placements[lastPi];
+        setOccupancy(ctx, pi);
+      }
+      ctx.placements.pop();
+      if (ctx.groupCounts) ctx.groupCounts[removedP.groupIdx]--;
+      rebuildGroupCounts(ctx);
+
+      // Try to fill the freed space with better items
+      let filled = false;
+      for (const gInfo2 of ctx.groupInfo) {
+        if (!gInfo2.hasPrimary) continue;
+        const gi2 = gInfo2.groupIdx;
+        const group2 = fs.groups[gi2];
+        const rots2 = getAllowedRotations(group2);
+        const maxP2 = group2.max ?? 100;
+        for (const ii2 of gInfo2.heroItems) {
+          const item2 = group2.items[ii2];
+          if (!item2) continue;
+          const mult2 = item2.multiplierStats ?? item2.multiplier;
+          const removedMult = removedP.groupIdx === gi2
+            ? (fs.groups[gi2].items[removedP.itemIdx]?.multiplierStats ?? fs.groups[gi2].items[removedP.itemIdx]?.multiplier ?? 0)
+            : 0;
+          if (mult2 <= removedMult) continue;
+          if (countGroupPlacements(ctx, gi2) >= maxP2) continue;
+          for (const rot2 of rots2) {
+            let bestPos2 = null, bestScore2 = -Infinity;
+            for (const { r, c } of ctx.roomTiles) {
+              if (ctx.occupancy[r][c] >= 0) continue;
+              if (!canPlaceOpt(ctx, gi2, ii2, rot2, r, c, undefined)) continue;
+              const s = scorePlacementPosition(ctx, gi2, ii2, rot2, r, c);
+              if (s > bestScore2) { bestScore2 = s; bestPos2 = { rot: rot2, row: r, col: c }; }
+            }
+            if (bestPos2 && placeItem(ctx, gi2, ii2, bestPos2.rot, bestPos2.row, bestPos2.col)) { filled = true; break; }
+          }
+          if (filled) break;
+        }
+        if (filled) break;
+      }
+
+      // Also try to place MORE items in the freed + adjacent space
+      if (filled) {
+        for (const gInfo2 of ctx.groupInfo) {
+          if (!gInfo2.hasPrimary) continue;
+          const gi2 = gInfo2.groupIdx;
+          const group2 = fs.groups[gi2];
+          const rots2 = getAllowedRotations(group2);
+          const maxP2 = group2.max ?? 100;
+          for (const ii2 of [...gInfo2.fillerItems, ...gInfo2.heroItems]) {
+            if (countGroupPlacements(ctx, gi2) >= maxP2) break;
+            let bestPos2 = null, bestScore2 = -Infinity;
+            for (const rot2 of rots2) {
+              for (const { r, c } of ctx.roomTiles) {
+                if (ctx.occupancy[r][c] >= 0) continue;
+                if (!canPlaceOpt(ctx, gi2, ii2, rot2, r, c, undefined)) continue;
+                const s = scorePlacementPosition(ctx, gi2, ii2, rot2, r, c);
+                if (s > bestScore2) { bestScore2 = s; bestPos2 = { rot: rot2, row: r, col: c }; }
+              }
+            }
+            if (bestPos2) placeItem(ctx, gi2, ii2, bestPos2.rot, bestPos2.row, bestPos2.col);
+          }
+        }
+      }
+
+      const postScore = scoreLayout(ctx);
+      if (postScore > preScore) {
+        anyImproved = true;
+        break; // restart from new state
+      }
+      // Revert
+      restoreSnapshot(ctx, snap);
+    }
+    if (!anyImproved) break;
+    await yieldToUI();
   }
 
-  // Sub-pass D: Final relative rebalance
-  if (ctx.relativeIndices.length > 0) {
-    placeRelativeItems(ctx, ctx.furnitureSet);
-  }
-}
+  // Sub-pass F: Lightweight SA — escape local optima with temperature-based acceptance
+  {
+    const rng = ctx.rng;
+    let currentScore = scoreLayout(ctx);
+    let bestKnown = currentScore;
+    let bestSnap = takeSnapshot(ctx);
+    let currentSnap = takeSnapshot(ctx);
 
-/** Quick check: is there at least one valid door candidate? For outdoor buildings, always true.
- *  Geometry-based — checks for outside tiles adjacent to room tiles, ignoring furniture. */
-function hasAnyDoorCandidate(ctx) {
-  if (!ctx.furnitureSet.mustBeIndoors) return true;
-  if (ctx._doorCandidateCache !== undefined) return ctx._doorCandidateCache;
-  const result = _hasAnyDoorCandidateImpl(ctx);
-  ctx._doorCandidateCache = result;
-  return result;
-}
+    const saIter = ctx.roomTiles.length > 500 ? 800 : 2000;
+    const T0 = 3000;
+    for (let iter = 0; iter < saIter; iter++) {
+      if (iter % 200 === 0 && iter > 0) await yieldToUI();
+      const temp = T0 * (1 - iter / saIter);
 
-function _hasAnyDoorCandidateImpl(ctx) {
-  const outside = findOutsideTiles(ctx);
-  for (let r = 0; r < ctx.gridH; r++) {
-    for (let c = 0; c < ctx.gridW; c++) {
-      if (ctx.room[r][c] || !outside[r][c]) continue;
-      for (const [dr, dc] of DIRS) {
-        const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW
-            && ctx.room[nr][nc]) {
-          return true;
+      restoreSnapshot(ctx, currentSnap);
+
+      const curRange = ctx.placements.length - ctx.lockedCount;
+      if (curRange <= 1) break;
+
+      // Pick a random move type
+      const moveType = rng();
+      let moved = false;
+
+      if (moveType < 0.45) {
+        // MOVE A: Remove 1-2 items, reinsert with possibly different sizes
+        const numRem = rng() < 0.5 ? 1 : Math.min(2, curRange);
+        const remIndices = [];
+        const firstIdx = ctx.lockedCount + Math.floor(rng() * curRange);
+        remIndices.push(firstIdx);
+
+        if (numRem > 1 && curRange > 1) {
+          // Prefer adjacent
+          const p0 = ctx.placements[firstIdx];
+          let bestDist = Infinity, bestPi = -1;
+          for (let tries = 0; tries < 5; tries++) {
+            const range2 = ctx.placements.length - ctx.lockedCount;
+            if (range2 <= 1) break;
+            const pi2 = ctx.lockedCount + Math.floor(rng() * range2);
+            if (remIndices.includes(pi2) || !ctx.placements[pi2]) continue;
+            const p2 = ctx.placements[pi2];
+            const d = Math.abs(p2.row - p0.row) + Math.abs(p2.col - p0.col);
+            if (d < bestDist) { bestDist = d; bestPi = pi2; }
+          }
+          if (bestPi >= 0) remIndices.push(bestPi);
+        }
+
+        // Save removed item info
+        const removedInfo = remIndices.map(idx => ({ ...ctx.placements[idx] }));
+        // Remove in reverse order
+        remIndices.sort((a, b) => b - a);
+        for (const idx of remIndices) {
+          clearOccupancy(ctx, idx);
+          const last = ctx.placements.length - 1;
+          if (idx !== last) {
+            clearOccupancy(ctx, last);
+            ctx.placements[idx] = ctx.placements[last];
+            setOccupancy(ctx, idx);
+          }
+          ctx.placements.pop();
+        }
+        rebuildGroupCounts(ctx);
+
+        // Reinsert — try different item sizes
+        for (const rem of removedInfo) {
+          const gInfo = ctx.groupInfo.find(g => g.groupIdx === rem.groupIdx);
+          if (!gInfo) continue;
+          const group = fs.groups[rem.groupIdx];
+          const rots = getAllowedRotations(group);
+          const maxP = group.max ?? 100;
+          if (countGroupPlacements(ctx, rem.groupIdx) >= maxP) continue;
+
+          const itemCandidates = [...gInfo.heroItems, ...gInfo.fillerItems];
+          if (!itemCandidates.includes(rem.itemIdx)) itemCandidates.push(rem.itemIdx);
+
+          let placed2 = false;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            const dr = Math.floor(rng() * 9) - 4;
+            const dc = Math.floor(rng() * 9) - 4;
+            const rot = rots[Math.floor(rng() * rots.length)];
+            const ii = itemCandidates[Math.floor(rng() * itemCandidates.length)];
+            if (placeItem(ctx, rem.groupIdx, ii, rot, rem.row + dr, rem.col + dc)) {
+              placed2 = true; break;
+            }
+          }
+          if (!placed2) {
+            let bestPos3 = null, bestScore3 = -Infinity, bestII3 = -1;
+            for (const ii of itemCandidates) {
+              for (const rot of rots) {
+                for (const { r, c } of ctx.roomTiles) {
+                  if (ctx.occupancy[r][c] >= 0) continue;
+                  if (!canPlaceOpt(ctx, rem.groupIdx, ii, rot, r, c, undefined)) continue;
+                  const s = scorePlacementPosition(ctx, rem.groupIdx, ii, rot, r, c);
+                  if (s > bestScore3) { bestScore3 = s; bestPos3 = { rot, row: r, col: c }; bestII3 = ii; }
+                }
+              }
+            }
+            if (bestPos3 && bestII3 >= 0) placeItem(ctx, rem.groupIdx, bestII3, bestPos3.rot, bestPos3.row, bestPos3.col);
+          }
+        }
+
+        // Gap fill freed space
+        for (const gInfo2 of ctx.groupInfo) {
+          if (!gInfo2.hasPrimary && gInfo2.priority > 1) continue;
+          const gi2 = gInfo2.groupIdx;
+          const group2 = fs.groups[gi2];
+          const rots2 = getAllowedRotations(group2);
+          const maxP2 = group2.max ?? 100;
+          for (const ii of [...gInfo2.heroItems, ...gInfo2.fillerItems]) {
+            if (countGroupPlacements(ctx, gi2) >= maxP2) break;
+            let bestPos = null, bestScore = -Infinity;
+            for (const rot of rots2) {
+              for (const { r, c } of ctx.roomTiles) {
+                if (ctx.occupancy[r][c] >= 0) continue;
+                if (!canPlaceOpt(ctx, gi2, ii, rot, r, c, undefined)) continue;
+                const s = scorePlacementPosition(ctx, gi2, ii, rot, r, c);
+                if (s > bestScore) { bestScore = s; bestPos = { rot, row: r, col: c }; }
+              }
+            }
+            if (bestPos) placeItem(ctx, gi2, ii, bestPos.rot, bestPos.row, bestPos.col);
+          }
+        }
+        if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+        moved = true;
+
+      } else if (moveType < 0.75) {
+        // MOVE B: Shift a random item ±1-2 tiles
+        const pi = ctx.lockedCount + Math.floor(rng() * curRange);
+        const p = ctx.placements[pi];
+        const shift = Math.floor(rng() * 4) + 1;
+        const sr = (Math.floor(rng() * (2 * shift + 1)) - shift);
+        const sc = (Math.floor(rng() * (2 * shift + 1)) - shift);
+        if (sr !== 0 || sc !== 0) {
+          clearOccupancy(ctx, pi);
+          const origR = p.row, origC = p.col;
+          p.row += sr; p.col += sc;
+          const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+          let fits = true;
+          for (let tr = 0; tr < tiles.length && fits; tr++)
+            for (let tc = 0; tc < (tiles[tr]?.length ?? 0) && fits; tc++) {
+              if (tiles[tr][tc] === null) continue;
+              const gr = p.row + tr, gc = p.col + tc;
+              if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
+              else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+            }
+          if (fits) { setOccupancy(ctx, pi); moved = true; }
+          else { p.row = origR; p.col = origC; setOccupancy(ctx, pi); }
+        }
+
+      } else {
+        // MOVE C: Resize — swap a random item for a different size variant
+        const pi = ctx.lockedCount + Math.floor(rng() * curRange);
+        const p = ctx.placements[pi];
+        const group = fs.groups[p.groupIdx];
+        if (group.items.length > 1) {
+          const newII = Math.floor(rng() * group.items.length);
+          if (newII !== p.itemIdx) {
+            clearOccupancy(ctx, pi);
+            const origII = p.itemIdx;
+            p.itemIdx = newII;
+            // Try with small shifts
+            const shifts2 = [[0,0],[0,1],[0,-1],[1,0],[-1,0]];
+            let found = false;
+            for (const [sr2, sc2] of shifts2) {
+              const oR = p.row, oC = p.col;
+              p.row += sr2; p.col += sc2;
+              const tiles = getCachedTiles(ctx, p.groupIdx, newII, p.rotation);
+              let fits = true;
+              for (let tr = 0; tr < tiles.length && fits; tr++)
+                for (let tc = 0; tc < (tiles[tr]?.length ?? 0) && fits; tc++) {
+                  if (tiles[tr][tc] === null) continue;
+                  const gr = p.row + tr, gc = p.col + tc;
+                  if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
+                  else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+                }
+              if (fits) { setOccupancy(ctx, pi); moved = true; found = true; break; }
+              p.row = oR; p.col = oC;
+            }
+            if (!found) { p.itemIdx = origII; setOccupancy(ctx, pi); }
+          }
+        }
+      }
+
+      if (!moved) continue;
+
+      // Evaluate
+      const walkOk = checkWalkabilityOpt(ctx) && hasAnyDoorCandidate(ctx);
+      const newScore = walkOk ? scoreLayout(ctx) : -Infinity;
+      const delta = newScore - currentScore;
+
+      if (delta > 0 || (temp > 0 && Math.exp(delta / temp) > rng())) {
+        currentScore = newScore;
+        currentSnap = takeSnapshot(ctx);
+        if (newScore > bestKnown) {
+          bestKnown = newScore;
+          bestSnap = takeSnapshot(ctx);
         }
       }
     }
+    restoreSnapshot(ctx, bestSnap);
   }
-  for (let r = 0; r < ctx.gridH; r++) {
-    for (let c = 0; c < ctx.gridW; c++) {
-      if (ctx.room[r][c]) continue;
-      for (const [dr, dc] of DIRS) {
-        const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW
-            && ctx.room[nr][nc]) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
+
+  // Sub-pass G: Final efficiency/relative rebalance
+  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+  if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
 }
 
-// ── Phase 3: Room Trimming ───────────────────────────────
+// ══════════════════════════════════════════════════════════
+// Phase 5: Trim, Doors, Validation
+// ══════════════════════════════════════════════════════════
 
 async function trimPhase(ctx) {
-  // Pass 1: Create support pillars FIRST (while tiles are still available)
-  if (ctx.furnitureSet.mustBeIndoors) {
-    await createSupportPillars(ctx);
-  }
+  // Pass 1: Create support pillars
+  if (ctx.furnitureSet.mustBeIndoors) await createSupportPillars(ctx);
 
-  // Pass 2: Trim unoccupied tiles that actually reduce the building footprint.
-  // The game places walls 8-directionally around room tiles. Removing a single edge
-  // tile just converts it to a wall — no footprint reduction. We need to only trim
-  // tiles whose removal frees wall tiles that were exclusively caused by that room tile.
+  // Pass 2: Trim unoccupied tiles
   for (let pass = 0; pass < 5; pass++) {
     let trimmed = false;
     await yieldToUI();
 
-    // Build wall reference count: for each non-room tile, count 8-dir adjacent room tiles.
-    // Tiles with wallRef[r][c] == 1 are walls caused by a single room tile.
     const wallRef = Array.from({ length: ctx.gridH }, () => new Int8Array(ctx.gridW));
-    for (let r = 0; r < ctx.gridH; r++) {
+    for (let r = 0; r < ctx.gridH; r++)
       for (let c = 0; c < ctx.gridW; c++) {
         if (ctx.room[r][c]) continue;
         let count = 0;
         for (const [dr, dc] of DIRS8) {
           const nr = r + dr, nc = c + dc;
-          if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) {
-            count++;
-          }
+          if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) count++;
         }
         wallRef[r][c] = count;
       }
-    }
 
-    // Collect unoccupied room tiles and compute footprint reduction
     const candidates = [];
-    for (let r = 0; r < ctx.gridH; r++) {
+    for (let r = 0; r < ctx.gridH; r++)
       for (let c = 0; c < ctx.gridW; c++) {
-        if (!ctx.room[r][c]) continue;
-        if (ctx.occupancy[r][c] >= 0) continue;
-
-        // Compute how many footprint tiles would be freed by removing (r,c)
+        if (!ctx.room[r][c] || ctx.occupancy[r][c] >= 0) continue;
         let fpReduction = 0;
-
-        // Check (r,c) itself: becomes free only if no remaining room tile is 8-dir adjacent
         let hasRoomNeighbor8 = false;
         for (const [dr, dc] of DIRS8) {
           const nr = r + dr, nc = c + dc;
           if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) {
-            hasRoomNeighbor8 = true;
-            break;
+            hasRoomNeighbor8 = true; break;
           }
         }
-        if (!hasRoomNeighbor8) fpReduction++; // position exits footprint entirely
-
-        // Check 8-dir non-room neighbors: freed if their only room neighbor was (r,c)
+        if (!hasRoomNeighbor8) fpReduction++;
         for (const [dr, dc] of DIRS8) {
           const nr = r + dr, nc = c + dc;
           if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW) continue;
-          if (ctx.room[nr][nc]) continue; // room tile, not a wall
-          if (wallRef[nr][nc] === 1) fpReduction++; // exclusively our wall → freed
+          if (ctx.room[nr][nc]) continue;
+          if (wallRef[nr][nc] === 1) fpReduction++;
         }
-
-        if (fpReduction > 0) {
-          candidates.push({ r, c, fpReduction });
-        }
+        if (fpReduction > 0) candidates.push({ r, c, fpReduction });
       }
-    }
 
-    // Most footprint reduction first
     candidates.sort((a, b) => b.fpReduction - a.fpReduction);
-
     for (const cand of candidates) {
       if (canEraseTile(ctx, cand.r, cand.c)) {
         removeRoomTile(ctx, cand.r, cand.c);
         trimmed = true;
       }
     }
-
     if (!trimmed) break;
   }
 
-  // Pass 3: Re-check stability after trimming (trim might have improved or worsened it)
-  if (ctx.furnitureSet.mustBeIndoors) {
-    await createSupportPillars(ctx);
-  }
+  // Pass 3: Re-check stability
+  if (ctx.furnitureSet.mustBeIndoors) await createSupportPillars(ctx);
 }
 
-/** Phase 3c: Fill isolated empty tiles (3+ occupied/wall neighbors) with 1x1 items. */
-async function microGapFill(ctx) {
-  const { furnitureSet: fs, gridW, gridH } = ctx;
-  const currentScore = scoreLayoutSA(ctx);
-
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (!ctx.room[r][c] || ctx.occupancy[r][c] >= 0) continue;
-      // Count occupied + wall neighbors
-      let solidCount = 0;
-      for (const [dr, dc] of DIRS) {
-        const nr = r + dr, nc = c + dc;
-        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !ctx.room[nr][nc]) {
-          solidCount++;
-        } else if (ctx.occupancy[nr][nc] >= 0) {
-          solidCount++;
-        }
-      }
-      if (solidCount < 3) continue;
-
-      // Try placing a 1x1 item from any group under its max
-      let bestGi = -1, bestIi = -1, bestRot = 0, bestScore = currentScore;
-      for (let gi = 0; gi < fs.groups.length; gi++) {
-        const group = fs.groups[gi];
-        const maxP = group.max ?? 100;
-        if (countGroupPlacements(ctx, gi) >= maxP) continue;
-        const rots = getAllowedRotations(group);
-        for (let ii = 0; ii < group.items.length; ii++) {
-          if (countItemTiles(group.items[ii]) !== 1) continue;
-          for (const rot of rots) {
-            if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
-            const pi = ctx.placements.length;
-            ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: rot, row: r, col: c });
-            setOccupancy(ctx, pi);
-            if (ctx.groupCounts) ctx.groupCounts[gi]++;
-            const s = scoreLayoutSA(ctx);
-            if (s > bestScore && checkWalkabilityOpt(ctx)) {
-              bestScore = s;
-              bestGi = gi; bestIi = ii; bestRot = rot;
-            }
-            clearOccupancy(ctx, pi);
-            if (ctx.groupCounts) ctx.groupCounts[gi]--;
-            ctx.placements.pop();
-          }
-        }
-      }
-      if (bestGi >= 0) {
-        const pi = ctx.placements.length;
-        ctx.placements.push({ groupIdx: bestGi, itemIdx: bestIi, rotation: bestRot, row: r, col: c });
-        setOccupancy(ctx, pi);
-        if (ctx.groupCounts) ctx.groupCounts[bestGi]++;
-        // Re-verify walkability (prior gap-fills may have changed the state)
-        if (!checkWalkabilityOpt(ctx)) {
-          clearOccupancy(ctx, pi);
-          if (ctx.groupCounts) ctx.groupCounts[bestGi]--;
-          ctx.placements.pop();
-        }
-      }
-    }
-  }
-  await yieldToUI();
-}
-
-/** Erase interior tiles to create support pillars for unstable zones. */
-async function createSupportPillars(ctx) {
-  for (let pass = 0; pass < 10; pass++) {
-    const unstable = countUnstableTiles(ctx);
-    if (unstable === 0) break;
-    await yieldToUI();
-
-    // Find the unstable tile that's farthest from any wall (worst case)
-    let worstR = -1, worstC = -1, worstSupport = Infinity;
-    for (let r = 0; r < ctx.gridH; r++) {
-      for (let c = 0; c < ctx.gridW; c++) {
-        if (!ctx.room[r][c]) continue;
-        const sup = tileSupport(ctx.room, ctx.gridW, ctx.gridH, r, c);
-        if (sup < 1.0 && sup < worstSupport) {
-          worstSupport = sup;
-          worstR = r;
-          worstC = c;
-        }
-      }
-    }
-    if (worstR < 0) break;
-
-    // Try to erase an unoccupied tile near the unstable zone to create support
-    // Search outward from the unstable tile
-    let bestCandidate = null;
-    let bestCuredCount = 0;
-    const searchRadius = SUPPORT_RADIUS + 1;
-
-    for (let dr = -searchRadius; dr <= searchRadius; dr++) {
-      for (let dc = -searchRadius; dc <= searchRadius; dc++) {
-        const tr = worstR + dr, tc = worstC + dc;
-        if (tr < 0 || tr >= ctx.gridH || tc < 0 || tc >= ctx.gridW) continue;
-        if (!ctx.room[tr][tc]) continue;
-        if (ctx.occupancy[tr][tc] >= 0) continue;
-
-        // Test: how many unstable tiles would this cure?
-        ctx.room[tr][tc] = false;
-        const newUnstable = countUnstableTiles(ctx);
-        const connected = checkRoomConnectivity(ctx);
-        const walkable = connected && checkWalkabilityOpt(ctx);
-        ctx.room[tr][tc] = true;
-
-        if (!connected || !walkable) continue;
-        const cured = unstable - newUnstable;
-        if (cured > bestCuredCount) {
-          bestCuredCount = cured;
-          bestCandidate = { r: tr, c: tc };
-        }
-      }
-    }
-
-    if (!bestCandidate || bestCuredCount <= 0) break;
-
-    // Erase the tile
-    removeRoomTile(ctx, bestCandidate.r, bestCandidate.c);
-  }
-}
-
-// ── Phase 4: Door Optimization ───────────────────────────
-
-/** BFS from grid boundary through non-room tiles to find "outside" tiles.
- *  Support pillars (interior holes) won't be reached. */
-function findOutsideTiles(ctx) {
-  const { gridW, gridH, room } = ctx;
-  const outside = Array.from({ length: gridH }, () => Array(gridW).fill(false));
-  const q = ctx.bfsQueue;
-  q.reset();
-
-  // Seed: all boundary non-room tiles + off-grid is implicitly outside
-  for (let r = 0; r < gridH; r++) {
-    for (let c = 0; c < gridW; c++) {
-      if (room[r][c]) continue;
-      if (r === 0 || r === gridH - 1 || c === 0 || c === gridW - 1) {
-        outside[r][c] = true;
-        q.push(r, c);
-      }
-    }
-  }
-
-  // If room fills entire boundary, also seed non-room tiles adjacent to off-grid
-  if (q.length === 0) {
-    for (let r = 0; r < gridH; r++) {
-      for (let c = 0; c < gridW; c++) {
-        if (room[r][c] || outside[r][c]) continue;
-        for (const [dr, dc] of DIRS) {
-          const nr = r + dr, nc = c + dc;
-          if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) {
-            outside[r][c] = true;
-            q.push(r, c);
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  while (q.length > 0) {
-    const [cr, cc] = q.shift();
-    for (const [dr, dc] of DIRS) {
-      const nr = cr + dr, nc = cc + dc;
-      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
-      if (outside[nr][nc] || room[nr][nc]) continue;
-      outside[nr][nc] = true;
-      q.push(nr, nc);
-    }
-  }
-
-  return outside;
-}
-
-/** Check if a 4-way neighbor is "open" — off-grid, or non-room with no room neighbor. */
-function isOpenTile(ctx, r, c) {
-  if (r < 0 || r >= ctx.gridH || c < 0 || c >= ctx.gridW) return true; // off-grid
-  if (ctx.room[r][c]) return false;
-  for (const [dr, dc] of DIRS) {
-    const nr = r + dr, nc = c + dc;
-    if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) {
-      return false; // it's a wall tile (adjacent to room), not open space
-    }
-  }
-  return true;
+function canEraseTile(ctx, r, c) {
+  if (!ctx.room[r][c]) return false;
+  if (ctx.occupancy[r][c] >= 0) return false;
+  if (ctx.roomTiles.length <= 1) return false;
+  ctx.room[r][c] = false;
+  const connected = checkRoomConnectivity(ctx);
+  const walkable = connected && checkWalkabilityOpt(ctx);
+  ctx.room[r][c] = true;
+  return connected && walkable;
 }
 
 function doorPhase(ctx) {
   if (!ctx.furnitureSet.mustBeIndoors) return;
   ctx.doors = new Set();
-
   const outside = findOutsideTiles(ctx);
 
-  // Valid door: outer wall tile that connects room to open exterior
   const candidates = [];
-  for (let r = 0; r < ctx.gridH; r++) {
+  for (let r = 0; r < ctx.gridH; r++)
     for (let c = 0; c < ctx.gridW; c++) {
-      if (ctx.room[r][c]) continue;
-      if (!outside[r][c]) continue;
-
-      // Check if adjacent to any room tile
+      if (ctx.room[r][c] || !outside[r][c]) continue;
       let hasAdj = false;
       for (const [dr, dc] of DIRS) {
         const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) {
-          hasAdj = true; break;
-        }
+        if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) { hasAdj = true; break; }
       }
       if (!hasAdj) continue;
 
-      // Door must connect outside to room along the SAME axis:
-      // one side is room, opposite side is open exterior.
-      // Additionally, the perpendicular neighbors must NOT be room tiles —
-      // this prevents doors at trimmed corners/notches where the wall
-      // changes direction (diagonal-only connection to part of the room).
       let validDoor = false;
       for (const [dr, dc] of DIRS) {
         const ar = r + dr, ac = c + dc;
         const br = r - dr, bc = c - dc;
-        const aIsRoom = ar >= 0 && ar < ctx.gridH && ac >= 0 && ac < ctx.gridW
-            && ctx.room[ar][ac];
-        const bIsRoom = br >= 0 && br < ctx.gridH && bc >= 0 && bc < ctx.gridW
-            && ctx.room[br][bc];
+        const aIsRoom = ar >= 0 && ar < ctx.gridH && ac >= 0 && ac < ctx.gridW && ctx.room[ar][ac];
+        const bIsRoom = br >= 0 && br < ctx.gridH && bc >= 0 && bc < ctx.gridW && ctx.room[br][bc];
         const aIsOpen = isOpenTile(ctx, ar, ac);
         const bIsOpen = isOpenTile(ctx, br, bc);
         if ((aIsRoom && bIsOpen) || (bIsRoom && aIsOpen)) {
-          // Check perpendicular: neither side should be room (flat wall check)
           const pr1 = r + dc, pc1 = c + dr;
           const pr2 = r - dc, pc2 = c - dr;
-          const perp1Room = pr1 >= 0 && pr1 < ctx.gridH && pc1 >= 0 && pc1 < ctx.gridW
-              && ctx.room[pr1][pc1];
-          const perp2Room = pr2 >= 0 && pr2 < ctx.gridH && pc2 >= 0 && pc2 < ctx.gridW
-              && ctx.room[pr2][pc2];
-          if (!perp1Room && !perp2Room) {
-            validDoor = true;
-            break;
-          }
+          const perp1Room = pr1 >= 0 && pr1 < ctx.gridH && pc1 >= 0 && pc1 < ctx.gridW && ctx.room[pr1][pc1];
+          const perp2Room = pr2 >= 0 && pr2 < ctx.gridH && pc2 >= 0 && pc2 < ctx.gridW && ctx.room[pr2][pc2];
+          if (!perp1Room && !perp2Room) { validDoor = true; break; }
         }
       }
       if (!validDoor) continue;
 
-      // Door must have at least one adjacent walkable room tile — a door behind
-      // furniture is useless since workers can't reach it
       let hasWalkable = false;
       for (const [dr, dc] of DIRS) {
         const nr = r + dr, nc = c + dc;
         if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW
             && ctx.room[nr][nc] && ctx.blockerCount[nr][nc] === 0) {
-          hasWalkable = true;
-          break;
+          hasWalkable = true; break;
         }
       }
       if (!hasWalkable) continue;
 
       candidates.push({ r, c });
     }
-  }
 
   if (candidates.length === 0) return;
 
-  // Greedy marginal placement: each round, pick the door that most reduces
-  // average walk distance from work/storage tiles to their nearest door.
-  // This naturally spaces doors around the room perimeter.
-  // All valid doors are placed (marginal scoring controls order, not count).
   while (candidates.length > 0) {
-    // Pass 1: Filter candidates that would break isolation (with current doors)
     for (let i = candidates.length - 1; i >= 0; i--) {
       const cand = candidates[i];
       ctx.doors.add(`${cand.r},${cand.c}`);
       const iso = computeIsolationOpt(ctx);
       ctx.doors.delete(`${cand.r},${cand.c}`);
-      if (iso < 0.995) {
-        candidates.splice(i, 1);
-      }
+      if (iso < 0.995) candidates.splice(i, 1);
     }
-
     if (candidates.length === 0) break;
 
-    // Pass 2: Score each remaining candidate by resulting avg walk distance
-    // First door: minimize distance to storage; subsequent: minimize distance to workstations
     const target = ctx.doors.size === 0 ? "storage" : "work";
-    let bestIdx = -1;
-    let bestAvg = Infinity;
+    let bestIdx = -1, bestAvg = Infinity;
     for (let i = 0; i < candidates.length; i++) {
       const cand = candidates[i];
       ctx.doors.add(`${cand.r},${cand.c}`);
       const avg = computeAvgWalkDistance(ctx, target);
       ctx.doors.delete(`${cand.r},${cand.c}`);
-      if (avg < bestAvg) {
-        bestAvg = avg;
-        bestIdx = i;
-      }
+      if (avg < bestAvg) { bestAvg = avg; bestIdx = i; }
     }
-
     if (bestIdx < 0) break;
-
     const best = candidates[bestIdx];
     ctx.doors.add(`${best.r},${best.c}`);
     candidates.splice(bestIdx, 1);
   }
 }
 
-/** Multi-source BFS from all placed doors. Returns avg walk distance to target tiles.
- *  @param {string} target - "storage" (data===2 tiles) or "work" (mustBeReachable tiles)
- *  For mustBeReachable furniture tiles, distance is measured to the nearest
- *  adjacent walkable room tile (the tile a worker stands on to interact). */
 function computeAvgWalkDistance(ctx, target) {
   const { gridW, gridH, room, furnitureSet: fs, placements, doors } = ctx;
   if (doors.size === 0) return Infinity;
-
   const dist = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
   const q = ctx.bfsQueue;
   q.reset();
-
-  // Seed BFS from walkable room tiles adjacent to each door
   for (const key of doors) {
     const [dr, dc] = key.split(",").map(Number);
     for (const [ddr, ddc] of DIRS) {
@@ -3597,7 +2294,6 @@ function computeAvgWalkDistance(ctx, target) {
       }
     }
   }
-
   while (q.length > 0) {
     const [cr, cc] = q.shift();
     for (const [dr, dc] of DIRS) {
@@ -3608,57 +2304,36 @@ function computeAvgWalkDistance(ctx, target) {
       q.push(nr, nc);
     }
   }
-
-  // Collect target furniture tiles
   let totalDist = 0, count = 0;
   for (const p of placements) {
     const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-    for (let r = 0; r < tiles.length; r++) {
+    for (let r = 0; r < tiles.length; r++)
       for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
         const tileKey = tiles[r][c];
         if (tileKey === null) continue;
         const tt = fs.tileTypes[tileKey];
         if (!tt) continue;
         const gr = p.row + r, gc = p.col + c;
-
         if (target === "storage" && tt.data !== 2) continue;
         if (target === "work" && !tt.mustBeReachable) continue;
-
-        // Find the nearest walkable room tile adjacent to this furniture tile
         let minD = Infinity;
         for (const [dr, dc] of DIRS) {
           const nr = gr + dr, nc = gc + dc;
-          if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && dist[nr][nc] >= 0) {
-            minD = Math.min(minD, dist[nr][nc]);
-          }
+          if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && dist[nr][nc] >= 0) minD = Math.min(minD, dist[nr][nc]);
         }
-        // Also check the tile itself if walkable
-        if (dist[gr]?.[gc] >= 0) {
-          minD = Math.min(minD, dist[gr][gc]);
-        }
-        if (minD < Infinity) {
-          totalDist += minD;
-          count++;
-        }
+        if (dist[gr]?.[gc] >= 0) minD = Math.min(minD, dist[gr][gc]);
+        if (minD < Infinity) { totalDist += minD; count++; }
       }
-    }
   }
-
   if (count === 0) return Infinity;
   return totalDist / count;
 }
 
-// ── Phase 5: Final Validation ────────────────────────────
-
 function validateFinal(ctx) {
   if (!checkWalkabilityOpt(ctx)) return false;
   if (!checkStabilityOpt(ctx)) return false;
-  // Efficiency is a soft constraint — handled by scoring, not validated here.
-  // Reverting the entire layout because of <100% efficiency wastes all SA work.
   if (ctx.building.storage > 0 && ctx.placements.length > 0 && !hasStorageTile(ctx)) return false;
   if (!checkRoomConnectivity(ctx)) return false;
-
-  // Group mins and maxes
   const fs = ctx.furnitureSet;
   for (let gi = 0; gi < fs.groups.length; gi++) {
     const group = fs.groups[gi];
@@ -3666,6 +2341,426 @@ function validateFinal(ctx) {
     if (group.min > 0 && count < group.min) return false;
     if (group.max != null && count > group.max) return false;
   }
-
   return true;
+}
+
+// ══════════════════════════════════════════════════════════
+// Gap-fill: fill remaining empty space with additional items
+// ══════════════════════════════════════════════════════════
+
+async function gapFillPhase(ctx) {
+  const { furnitureSet: fs } = ctx;
+
+  // Sort groups by priority (primary stat first)
+  const sortedGroups = [...ctx.groupInfo].sort((a, b) => a.priority - b.priority);
+
+  for (let pass = 0; pass < 3; pass++) {
+    let filled = false;
+    for (const gInfo of sortedGroups) {
+      if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) continue;
+      if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) continue;
+
+      const gi = gInfo.groupIdx;
+      const group = fs.groups[gi];
+      const maxP = group.max ?? 100;
+      if (countGroupPlacements(ctx, gi) >= maxP) continue;
+
+      const rots = getAllowedRotations(group);
+      // Try all items from largest to smallest
+      const candidates = [...gInfo.heroItems, ...gInfo.fillerItems];
+
+      for (const ii of candidates) {
+        if (countGroupPlacements(ctx, gi) >= maxP) break;
+
+        let bestPos = null, bestScore = -Infinity;
+        for (const rot of rots) {
+          for (const { r, c } of ctx.roomTiles) {
+            if (ctx.occupancy[r][c] >= 0) continue;
+            if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
+            const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
+            if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+          }
+        }
+
+        if (bestPos) {
+          if (placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) filled = true;
+        }
+      }
+    }
+    if (!filled) break;
+    await yieldToUI();
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// Fallback: Constructive placement (when strips don't produce good results)
+// ══════════════════════════════════════════════════════════
+
+/**
+ * Sort room tiles with wall-adjacency priority, optionally reversed.
+ * @param {object} ctx
+ * @param {boolean} reverse - if true, reverse the sort (bottom-right priority)
+ */
+function sortRoomTilesForConstruction(ctx, reverse) {
+  ctx.roomTiles.sort((a, b) => {
+    let wallA = 0, wallB = 0;
+    for (const [dr, dc] of DIRS) {
+      let nr = a.r + dr, nc = a.c + dc;
+      if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) wallA++;
+      nr = b.r + dr; nc = b.c + dc;
+      if (nr < 0 || nr >= ctx.gridH || nc < 0 || nc >= ctx.gridW || !ctx.room[nr][nc]) wallB++;
+    }
+    if (wallA !== wallB) return reverse ? wallA - wallB : wallB - wallA;
+    // Tiebreak: position (top-left first or bottom-right first)
+    if (reverse) return (b.r * ctx.gridW + b.c) - (a.r * ctx.gridW + a.c);
+    return (a.r * ctx.gridW + a.c) - (b.r * ctx.gridW + b.c);
+  });
+}
+
+/**
+ * Single constructive pass: place hero items then fillers.
+ * @param {object} ctx
+ * @param {object} options
+ * @param {number} options.skipInterval - skip every Nth hero placement (0=no skip)
+ * @param {number} options.heroRotate - rotate hero list by this many positions
+ * @param {boolean} options.reverseScan - reverse room tile scan order
+ * @param {boolean} options.tryAllHeroSizes - try all item sizes per group, not just heroes
+ * @param {number} [options.maxItemHeight] - restrict primary group items to this max height
+ * @param {boolean} [options.mixedSizing] - evaluate all items at each step, pick best globally
+ * @param {boolean} [options.preferLarger] - score by raw multiplier instead of density (favors bigger items)
+ */
+async function constructivePass(ctx, options) {
+  const { furnitureSet: fs } = ctx;
+  const { skipInterval = 0, heroRotate = 0, reverseScan = false, tryAllHeroSizes = false, maxItemHeight, mixedSizing = false, preferLarger = false } = options;
+  const sortedGroups = [...ctx.groupInfo].sort((a, b) => a.priority - b.priority);
+
+  sortRoomTilesForConstruction(ctx, reverseScan);
+
+  let placementCount = 0;
+
+  // Pass 1: Hero items — place best item at best position iteratively
+  for (const gInfo of sortedGroups) {
+    const gi = gInfo.groupIdx;
+    const group = fs.groups[gi];
+    const maxP = group.max ?? 100;
+
+    if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) continue;
+    if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) continue;
+
+    let placed = countGroupPlacements(ctx, gi);
+    const rots = getAllowedRotations(group);
+
+    // Build candidate item list
+    let itemList;
+    if (tryAllHeroSizes) {
+      itemList = group.items.map((_, ii) => ii).filter(ii => getValueDensity(ctx, gi, ii) > 0);
+      // Filter by max item height if specified (only for primary groups)
+      if (maxItemHeight !== undefined && gInfo.hasPrimary) {
+        itemList = itemList.filter(ii => group.items[ii].tiles.length <= maxItemHeight);
+      }
+      itemList.sort((a, b) => getValueDensity(ctx, gi, b) - getValueDensity(ctx, gi, a));
+    } else {
+      itemList = gInfo.heroItems.length > 0 ? [...gInfo.heroItems] : (gInfo.bestHeroIdx >= 0 ? [gInfo.bestHeroIdx] : []);
+    }
+    if (itemList.length === 0 && group.min > 0 && gInfo.fillerItems.length > 0) {
+      itemList = [gInfo.fillerItems[0]];
+    }
+    if (heroRotate > 0 && itemList.length > 1) {
+      const rot2 = heroRotate % itemList.length;
+      itemList = [...itemList.slice(rot2), ...itemList.slice(0, rot2)];
+    }
+
+    if (mixedSizing) {
+      // Mixed sizing: at each step, evaluate ALL items and pick the globally best (item, rot, pos)
+      let keepGoing = true;
+      while (keepGoing && placed < maxP) {
+        keepGoing = false;
+        if (skipInterval > 0 && placementCount > 0 && placementCount % skipInterval === (skipInterval - 1)) {
+          placementCount++;
+          break;
+        }
+
+        let bestPos = null, bestScore = -Infinity, bestII = -1;
+        for (const ii of itemList) {
+          if (ii < 0) continue;
+          const rawMult = preferLarger ? (fs.groups[gi].items[ii]?.multiplierStats ?? fs.groups[gi].items[ii]?.multiplier ?? 1) : 1;
+          for (const rot of rots) {
+            for (const { r, c } of ctx.roomTiles) {
+              if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
+              const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c) * rawMult;
+              if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; bestII = ii; }
+            }
+          }
+        }
+        if (bestPos && bestII >= 0 && placeItem(ctx, gi, bestII, bestPos.rot, bestPos.row, bestPos.col)) {
+          placed++;
+          placementCount++;
+          keepGoing = true;
+          if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+          if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+        }
+      }
+    } else {
+      for (const ii of itemList) {
+        if (ii < 0) continue;
+        let keepGoing = true;
+        while (keepGoing && placed < maxP) {
+          keepGoing = false;
+
+          if (skipInterval > 0 && placementCount > 0 && placementCount % skipInterval === (skipInterval - 1)) {
+            placementCount++;
+            break;
+          }
+
+          let bestPos = null, bestScore = -Infinity;
+          for (const rot of rots) {
+            for (const { r, c } of ctx.roomTiles) {
+              if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
+              const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
+              if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+            }
+          }
+          if (bestPos && placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
+            placed++;
+            placementCount++;
+            keepGoing = true;
+            if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+            if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+          }
+        }
+      }
+    }
+
+    await yieldToUI();
+  }
+
+  // Pass 2: Filler items
+  for (const gInfo of sortedGroups) {
+    const gi = gInfo.groupIdx;
+    const group = fs.groups[gi];
+    const maxP = group.max ?? 100;
+    if (gInfo.hasEfficiency && !gInfo.hasPrimary && ctx.empIdx >= 0 && ctx.effIdx >= 0) continue;
+    if (gInfo.hasRelative && !gInfo.hasPrimary && ctx.relativeIndices.length > 0) continue;
+
+    let placed = countGroupPlacements(ctx, gi);
+    if (placed >= maxP) continue;
+    const rots = getAllowedRotations(group);
+
+    for (const ii of gInfo.fillerItems) {
+      if (placed >= maxP) break;
+      let keepGoing = true;
+      while (keepGoing && placed < maxP) {
+        keepGoing = false;
+        let bestPos = null, bestScore = -Infinity;
+        for (const rot of rots) {
+          for (const { r, c } of ctx.roomTiles) {
+            if (!canPlaceOpt(ctx, gi, ii, rot, r, c, undefined)) continue;
+            const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
+            if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+          }
+        }
+        if (bestPos && placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
+          placed++;
+          keepGoing = true;
+          if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+          if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+        }
+      }
+    }
+
+    await yieldToUI();
+  }
+
+  // Final stat passes
+  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+  if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+}
+
+// ══════════════════════════════════════════════════════════
+// Main entry point
+// ══════════════════════════════════════════════════════════
+
+/**
+ * Run the v2 optimizer on the given room state.
+ * @param {{
+ *   building: import('../types.js').Building,
+ *   furnitureSet: import('../types.js').FurnitureSet,
+ *   gridW: number, gridH: number,
+ *   room: boolean[][], placements: Array<{groupIdx:number, itemIdx:number, rotation:number, row:number, col:number}>,
+ *   doors: Set<string>
+ * }} input
+ * @returns {Promise<{room: boolean[][], placements: Array<{groupIdx:number, itemIdx:number, rotation:number, row:number, col:number}>, doors: Set<string>}>}
+ */
+/**
+ * Run a full strategy (constructive or strip) with gap fill and stat balancing.
+ * Returns { score, snapshot }.
+ */
+async function runStrategy(ctx, strategyFn) {
+  await strategyFn(ctx);
+  placeMandatoryItems(ctx);
+  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+  if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+  await gapFillPhase(ctx);
+  if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+  if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+  return { score: scoreLayout(ctx), snapshot: takeSnapshot(ctx) };
+}
+
+export async function runOptimizer(input) {
+  const ctx = createContext(input);
+  if (!ctx) return input;
+
+  // Phase 0: Analysis & precomputation
+  analyzePhase(ctx);
+  preCleanRoom(ctx);
+  await prePlacePillars(ctx);
+
+  const initialSnapshot = takeSnapshot(ctx);
+
+  let bestScore = -Infinity;
+  let bestSnapshot = null;
+
+  // Strategy A: Strip-based filling
+  restoreSnapshot(ctx, initialSnapshot);
+  const stripResult = await runStrategy(ctx, (c) => stripFillPhase(c));
+  if (stripResult.score > bestScore) {
+    bestScore = stripResult.score;
+    bestSnapshot = stripResult.snapshot;
+  }
+
+  // Strategy B–F: Multiple constructive restarts with variation
+  // Generate constructive configs — scale count by room size
+  const roomArea = ctx.roomTiles.length;
+  const isLargeRoom = roomArea > 500;
+
+  const constructiveConfigs = [
+    { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false },  // baseline
+    { skipInterval: 4, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false },  // skip diversity
+    { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: false },  // reversed scan
+    { skipInterval: 0, heroRotate: 1, reverseScan: false, tryAllHeroSizes: false },  // rotated heroes
+    { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true },   // all hero sizes
+  ];
+
+  if (!isLargeRoom) {
+    // Per-height-class strategies (only for smaller rooms where item size diversity matters)
+    for (const gInfo of ctx.groupInfo) {
+      if (!gInfo.hasPrimary) continue;
+      const group = ctx.furnitureSet.groups[gInfo.groupIdx];
+      const heights = new Set();
+      for (const item of group.items) heights.add(item.tiles.length);
+      for (const h of heights) {
+        constructiveConfigs.push(
+          { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, maxItemHeight: h },
+          { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: true, maxItemHeight: h },
+        );
+      }
+    }
+
+    // Additional diversity for small/medium rooms
+    constructiveConfigs.push(
+      { skipInterval: 4, heroRotate: 0, reverseScan: true, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 2, reverseScan: false, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 3, reverseScan: false, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 1, reverseScan: true, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 2, reverseScan: true, tryAllHeroSizes: false },
+      { skipInterval: 3, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: true, mixedSizing: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true, preferLarger: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: true, mixedSizing: true, preferLarger: true },
+    );
+  } else {
+    // For large rooms, just a few more configs
+    constructiveConfigs.push(
+      { skipInterval: 0, heroRotate: 2, reverseScan: false, tryAllHeroSizes: false },
+      { skipInterval: 4, heroRotate: 0, reverseScan: true, tryAllHeroSizes: false },
+    );
+  }
+
+  for (const config of constructiveConfigs) {
+    restoreSnapshot(ctx, initialSnapshot);
+    const result = await runStrategy(ctx, (c) => constructivePass(c, config));
+    if (result.score > bestScore) {
+      bestScore = result.score;
+      bestSnapshot = result.snapshot;
+    }
+  }
+
+  // Restore best pre-polish result
+  const bestPrePolish = bestSnapshot;
+  restoreSnapshot(ctx, bestSnapshot);
+
+  // Phase 4: Local search polish
+  await localSearchPhase(ctx);
+
+  // Phase 5: Trim, doors, validation
+  await trimPhase(ctx);
+  doorPhase(ctx);
+
+  if (!validateFinal(ctx)) {
+    restoreSnapshot(ctx, bestPrePolish);
+    doorPhase(ctx);
+  }
+
+  return { room: ctx.room, placements: ctx.placements, doors: ctx.doors };
+}
+
+// ── Context creation ─────────────────────────────────────
+function createContext(input) {
+  const { building, furnitureSet, gridW, gridH, room, placements, doors } = input;
+  if (!building || !furnitureSet) return null;
+
+  let roomCount = 0;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c]) roomCount++;
+  if (roomCount === 0) return null;
+
+  const clonedRoom = room.map(row => [...row]);
+  const clonedPlacements = placements.map(p => ({ ...p }));
+  const clonedDoors = new Set(doors);
+  const lockedCount = clonedPlacements.length;
+  const primaryStatIdx = findPrimaryStatIndex(furnitureSet, building);
+
+  const relativeIndices = [];
+  if (furnitureSet.stats && building.items) {
+    for (let i = 0; i < furnitureSet.stats.length; i++) {
+      const s = furnitureSet.stats[i];
+      if (s.type === "relative" || s.type === "employeesRelative") {
+        let hasContributor = false;
+        for (const bItem of building.items) {
+          if (bItem?.stats && (bItem.stats[i] ?? 0) > 0) { hasContributor = true; break; }
+        }
+        if (hasContributor) relativeIndices.push({ statIdx: i });
+      }
+    }
+  }
+  const relIdxSet = new Set(relativeIndices.map(rel => rel.statIdx));
+  const baseSeed = hashSeed(`${building.id}_${gridW}_${gridH}_${roomCount}`);
+
+  const ctx = {
+    building, furnitureSet, gridW, gridH,
+    room: clonedRoom, placements: clonedPlacements, doors: clonedDoors,
+    lockedCount, primaryStatIdx, relativeIndices, relIdxSet,
+    occupancy: null,
+    rng: createRNG(baseSeed), baseSeed,
+    tileCache: new Map(), groupInfo: [],
+    empIdx: -1, effIdx: -1,
+    roomTiles: [], roomTileSet: new Set(),
+    bfsQueue: createBFSQueue(gridW * gridH),
+    blockerCount: Array.from({ length: gridH }, () => new Int8Array(gridW)),
+    unstableTileCount: 0, stabilityDirty: true,
+    currentStats: null, statsDirty: true,
+    groupCounts: null, occupiedCount: 0,
+    groupGrid: Array.from({ length: gridH }, () => new Int16Array(gridW).fill(-1)),
+    mustReachGrid: new Int8Array(gridW * gridH),
+    visitedBuf: new Uint32Array(gridW * gridH), visitedStamp: 0,
+    blockedBuf: new Uint32Array(gridW * gridH), blockedStamp: 0,
+    mustReachCache: null, mustReachDirty: true,
+    _walkabilityValid: false,
+    _doorCandidateCache: undefined,
+  };
+
+  ctx.occupancy = buildOccupancyGrid(ctx);
+  return ctx;
 }

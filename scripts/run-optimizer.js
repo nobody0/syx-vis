@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Run the planner optimizer from the command line
 import { fromBase64url, toBase64url, parseBinaryPlan, serializePlanObj } from "../display/planner-core.js";
-import { runOptimizer } from "../display/optimizer.js";
 import { buildings } from "../data/buildings.js";
 import { furniture } from "../data/furniture.js";
 import zlib from "node:zlib";
@@ -68,6 +67,8 @@ if (!fs) {
   console.error(`No furniture set for building: ${plan.b}`);
   process.exit(1);
 }
+
+const { runOptimizer } = await import("../display/optimizer.js");
 
 console.error(`Optimizing: ${bld.name} (${plan.b}), ${plan.w}×${plan.h}, ${plan.placements.length} placements`);
 

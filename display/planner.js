@@ -10,7 +10,7 @@ import {
   fromBase64url, toBase64url, parseBinaryPlan, serializePlanObj,
 } from "./planner-core.js";
 
-// Re-export for backward compatibility (optimizer.js now imports from planner-core.js directly)
+// Re-export for backward compatibility
 export { AVAIL_BLOCKING, getRotatedTiles, getAllowedRotations, DIRS };
 
 const LS_KEY = "syx-vis-planner-state";
