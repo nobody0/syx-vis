@@ -435,6 +435,9 @@ const state = {
   shape: "rect",     // "rect"|"brush"|"circle"|"diamond"|"cross" — applies to draw/erase
   keepShape: false,  // optimizer: don't trim room
   maxDoors: 0,       // optimizer: 0 = auto, 1-3 = limit
+  pathingPriority: 0,    // optimizer: 0=off, 1=low, 2=high
+  storageDoorWeight: 0,  // optimizer: 0=off, 1=low, 2=high
+  minStorageSize: 0,     // optimizer: 0=auto (smallest), N=min tile count
   selectedGroupIdx: -1,
   selectedItemIdx: -1,
   rotation: 0,       // 0-3, 90° CW increments
@@ -1243,7 +1246,7 @@ function showTooltip(e, pi) {
     for (let s = 0; s < bItem.stats.length && s < fs.stats.length; s++) {
       if (bItem.stats[s] === 0) continue;
       const val = bItem.stats[s] * mult;
-      const statName = getStatDisplayName(fs.stats[s]);
+      const statName = capitalize(fs.stats[s].name);
       const sign = val > 0 ? "+" : "";
       html += `<div class="tip-detail">${statName}: ${sign}${val.toFixed(1)}</div>`;
     }
@@ -1543,54 +1546,156 @@ function refreshPalette() {
 
 // ── Stats panel ─────────────────────────────────────────
 
-const STAT_DISPLAY_NAMES = {
-  workers: "Employees",
-  output: "Workstation",
-  production: "Workstation",
-  stations: "Workstation",
-  efficiency: "Auxiliary",
-};
-function getStatDisplayName(stat) {
-  return STAT_DISPLAY_NAMES[stat.name] || capitalize(stat.name);
-}
-
 /** RGB triplets for category-colored group borders and palette accents. */
 const GROUP_COLORS = {
   Workstation: "90, 158, 255",
+  Station:     "90, 158, 255",
   Storage:     "108, 212, 90",
+  Shelving:    "108, 212, 90",
+  Conveyor:    "108, 212, 90",
   Auxiliary:   "255, 170, 68",
+  Quality:     "255, 170, 68",
   Employees:   "152, 112, 200",
+  Attendant:   "152, 112, 200",
   Seating:     "72, 200, 160",
+  Dining:      "72, 200, 160",
+  Capacity:    "72, 200, 160",
   Bed:         "180, 140, 200",
+  Housing:     "180, 140, 200",
   Lighting:    "240, 220, 100",
   Decoration:  "200, 160, 120",
+  Carpet:      "200, 160, 120",
+  Study:       "100, 180, 240",
+  Cell:        "160, 130, 110",
+  Grave:       "160, 130, 110",
+  Altar:       "200, 130, 220",
+  Pews:        "170, 140, 220",
+  Pedestal:    "200, 130, 220",
+  Podium:      "200, 130, 220",
+  Monument:    "200, 130, 220",
+  Hearth:      "240, 180, 100",
+  Target:      "220, 100, 100",
+  Lane:        "220, 100, 100",
+  Gate:        "160, 160, 180",
+  Fence:       "160, 160, 180",
+  Piping:      "100, 180, 160",
+  Equipment:   "170, 170, 170",
+  Furnishing:  "170, 170, 170",
+  Planting:    "130, 200, 100",
+  Irrigation:  "100, 180, 200",
+  Deposit:     "180, 160, 100",
+  Basin:       "100, 180, 200",
 };
 const GROUP_COLOR_FALLBACK = "160, 160, 160";
 
-/** Resolve the display label for a furniture group. */
-function getGroupLabel(fs, bld, groupIdx) {
-  let label = `Group ${groupIdx + 1}`;
-  if (fs.stats && bld && bld.items && bld.items[groupIdx]) {
-    const bItem = bld.items[groupIdx];
-    let bestIdx = -1, fallbackIdx = -1;
-    for (let si = 0; si < bItem.stats.length && si < fs.stats.length; si++) {
-      if (bItem.stats[si] <= 0) continue;
-      if (fs.stats[si].type === "employees") {
-        if (fallbackIdx < 0) fallbackIdx = si;
-      } else if (bestIdx < 0 || bItem.stats[si] > bItem.stats[bestIdx]) {
-        bestIdx = si;
+/** Classify a group by examining data tags (1–5) on its tile types. */
+function classifyGroupByDataTags(fs, groupIdx) {
+  const group = fs.groups[groupIdx];
+  const tagCounts = new Map();
+  let totalTagged = 0;
+  for (const item of group.items) {
+    for (const row of item.tiles) {
+      for (const tileKey of row) {
+        if (tileKey === null) continue;
+        const tt = fs.tileTypes[tileKey];
+        if (!tt || tt.data === undefined || tt.data < 1 || tt.data > 5) continue;
+        tagCounts.set(tt.data, (tagCounts.get(tt.data) || 0) + 1);
+        totalTagged++;
       }
     }
-    const labelIdx = bestIdx >= 0 ? bestIdx : fallbackIdx;
-    if (labelIdx >= 0 && fs.stats[labelIdx]) {
-      label = getStatDisplayName(fs.stats[labelIdx]);
+  }
+  if (totalTagged === 0) return null;
+  for (const [tag, count] of tagCounts) {
+    if (count / totalTagged >= 0.5) {
+      if (tag === 2) return "Storage";
+      if (tag === 4) return "Workstation";
     }
   }
-  if (label.startsWith("Group ")) {
-    const spriteLabel = deriveGroupLabelFromSprites(fs, groupIdx);
-    if (spriteLabel) label = spriteLabel;
+  return null;
+}
+
+/** Detect pure carpet/flooring groups (all tiles are CARPET sprites or ROOM-availability floor). */
+function isPureCarpetGroup(fs, groupIdx) {
+  const group = fs.groups[groupIdx];
+  for (const item of group.items) {
+    for (const row of item.tiles) {
+      for (const tileKey of row) {
+        if (tileKey === null) continue;
+        const tt = fs.tileTypes[tileKey];
+        if (!tt) return false;
+        const spr = tt.sprite || "";
+        if (!spr.startsWith("CARPET") && tt.availability !== "ROOM") return false;
+      }
+    }
   }
-  return label;
+  return true;
+}
+
+/** Stat name → group label (specific, high confidence). */
+const STAT_NAME_LABELS = {
+  beds: "Bed", baths: "Station", stations: "Station",
+  tables: "Dining", guests: "Dining",
+  crates: "Storage", storage: "Storage",
+  knowledge: "Study", spectators: "Seating",
+  prisoners: "Cell", occupants: "Housing",
+  patients: "Bed", servants: "Attendant", users: "Attendant",
+  students: "Study", worshippers: "Pews",
+  priests: "Altar", deposits: "Deposit",
+  fertility: "Planting", latrines: "Basin", basins: "Basin",
+  men: "Station", guards: "Station",
+};
+/** Stat type → group label (generic fallback). */
+const STAT_TYPE_LABELS = {
+  production: "Workstation", services: "Capacity",
+  efficiency: "Auxiliary", relative: "Quality",
+  irrigation: "Irrigation",
+};
+
+/** Derive group label from stat definitions. Returns {label, specific} or null. */
+function deriveGroupLabelFromStats(fs, bld, groupIdx) {
+  if (!fs.stats || !bld?.items?.[groupIdx]) return null;
+  const bItem = bld.items[groupIdx];
+  let bestIdx = -1, fallbackIdx = -1;
+  for (let si = 0; si < bItem.stats.length && si < fs.stats.length; si++) {
+    if (bItem.stats[si] <= 0) continue;
+    if (fs.stats[si].type === "employees" || fs.stats[si].type === "employeesRelative") {
+      if (fallbackIdx < 0) fallbackIdx = si;
+    } else if (bestIdx < 0 || bItem.stats[si] > bItem.stats[bestIdx]) {
+      bestIdx = si;
+    }
+  }
+  const labelIdx = bestIdx >= 0 ? bestIdx : fallbackIdx;
+  if (labelIdx < 0 || !fs.stats[labelIdx]) return null;
+  const stat = fs.stats[labelIdx];
+  const nameLabel = STAT_NAME_LABELS[stat.name];
+  if (nameLabel) return { label: nameLabel, specific: true };
+  const typeLabel = STAT_TYPE_LABELS[stat.type];
+  if (typeLabel) return { label: typeLabel, specific: false };
+  if (stat.type !== "employees" && stat.type !== "employeesRelative") {
+    return { label: capitalize(stat.name), specific: true };
+  }
+  return null;
+}
+
+/** Resolve the display label for a furniture group (three-source decision tree). */
+function getGroupLabel(fs, bld, groupIdx) {
+  // 1. Pure carpet/flooring
+  if (isPureCarpetGroup(fs, groupIdx)) return "Carpet";
+  // 2. Data tags (highest confidence for storage/workstation)
+  const dataLabel = classifyGroupByDataTags(fs, groupIdx);
+  if (dataLabel) return dataLabel;
+  // 3. Specific stat name
+  const statResult = deriveGroupLabelFromStats(fs, bld, groupIdx);
+  if (statResult?.specific) return statResult.label;
+  // 4. Specific sprite label (not generic "Workstation"/"Furnishing")
+  const spriteLabel = deriveGroupLabelFromSprites(fs, groupIdx);
+  if (spriteLabel && spriteLabel !== "Workstation" && spriteLabel !== "Furnishing") return spriteLabel;
+  // 5. Generic stat label
+  if (statResult) return statResult.label;
+  // 6. Generic sprite label
+  if (spriteLabel) return spriteLabel;
+  // 7. Fallback
+  return `Group ${groupIdx + 1}`;
 }
 
 /** Look up the RGB color triplet for a resolved group label. */
@@ -1608,6 +1713,14 @@ const SPRITE_LABEL_MAP = {
   TARGET: "Target", LANE: "Lane", FENCE: "Fence", PIPE: "Piping",
   MONUMENT: "Monument", ALTAR: "Altar", PODIUM: "Podium", PEDISTAL: "Pedestal",
   AUX: "Equipment", MISC: "Furnishing",
+  STALL: "Storage", WORKTABLE: "Workstation", BUNK: "Bed",
+  CONVEYOR: "Conveyor", HEARTH: "Hearth", GRAVE: "Grave",
+};
+/** Priority for sprite prefix tie-breaking (higher = preferred). */
+const SPRITE_PRIORITY = {
+  STORAGE: 10, WORK: 9, CHAIR: 8, BED: 8,
+  SHELF: 7, CRATE: 7, BENCH: 6, STOOL: 6,
+  TABLE: 3, MISC: 2, DECOR: 2, CARPET: 1,
 };
 
 /** Derive a group label from the dominant sprite prefix in its tiles. */
@@ -1620,19 +1733,20 @@ function deriveGroupLabelFromSprites(fs, groupIdx) {
         if (tileKey === null) continue;
         const tt = fs.tileTypes[tileKey];
         if (!tt?.sprite) continue;
-        // Extract prefix: strip trailing _1X1, _COMBO, _BOTTOM, _TOP, _A, etc.
         const prefix = tt.sprite.replace(/_(1X1|COMBO|BOTTOM|TOP|MID|END|IN|OUT|[A-C])(_.*)?$/, "")
           .replace(/_\d+$/, "");
         prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1);
       }
     }
   }
-  let bestPrefix = null, bestCount = 0;
+  let bestPrefix = null, bestScore = 0;
   for (const [prefix, count] of prefixCounts) {
-    if (count > bestCount) { bestPrefix = prefix; bestCount = count; }
+    const firstWord = prefix.split("_")[0];
+    const priority = SPRITE_PRIORITY[firstWord] || 0;
+    const score = count + priority / 100;
+    if (score > bestScore) { bestPrefix = prefix; bestScore = score; }
   }
   if (!bestPrefix) return null;
-  // Try exact match, then try first word
   if (SPRITE_LABEL_MAP[bestPrefix]) return SPRITE_LABEL_MAP[bestPrefix];
   const firstWord = bestPrefix.split("_")[0];
   return SPRITE_LABEL_MAP[firstWord] || capitalize(firstWord.toLowerCase());
@@ -1714,7 +1828,7 @@ function refreshStatsContent() {
 
     const row = el("div", "planner-stat-row");
 
-    const name = elText("span", getStatDisplayName(stat), "planner-stat-name");
+    const name = elText("span", capitalize(stat.name), "planner-stat-name");
     row.appendChild(name);
 
     let formatted;
@@ -1843,18 +1957,7 @@ function refreshValidation() {
     if (group.min > 0) {
       const count = countGroupPlacements(gi);
       if (count < group.min) {
-        let label = `Group ${gi + 1}`;
-        if (fs.stats && state.building?.items?.[gi]) {
-          const bItem = state.building.items[gi];
-          let bestI = -1, fallI = -1;
-          for (let si = 0; si < bItem.stats.length && si < fs.stats.length; si++) {
-            if (bItem.stats[si] <= 0) continue;
-            if (fs.stats[si].type === "employees") { if (fallI < 0) fallI = si; }
-            else if (bestI < 0 || bItem.stats[si] > bItem.stats[bestI]) bestI = si;
-          }
-          const li = bestI >= 0 ? bestI : fallI;
-          if (li >= 0 && fs.stats[li]) label = getStatDisplayName(fs.stats[li]);
-        }
+        const label = getGroupLabel(fs, state.building, gi);
         warnings.push({ type: "warn", msg: `${label}: need ${group.min - count} more (${count}/${group.min})` });
       }
     }
@@ -2619,6 +2722,9 @@ async function runAutoOptimize(btn) {
       doors: new Set(state.doors),
       keepShape: state.keepShape,
       maxDoors: state.maxDoors,
+      pathingPriority: state.pathingPriority,
+      storageDoorWeight: state.storageDoorWeight,
+      minStorageSize: state.minStorageSize,
       onProgress: (info) => updateOptimizeOverlay(overlay, btn, info),
     });
 
@@ -2771,6 +2877,51 @@ function buildSelector(container) {
   }
   doorSelect.addEventListener("change", () => { state.maxDoors = Number(doorSelect.value); });
   g1.appendChild(doorSelect);
+
+  // Pathing priority dropdown
+  const pathLabel = elText("span", "Pathing:", "planner-opt-setting-label");
+  g1.appendChild(pathLabel);
+  const pathSelect = document.createElement("select");
+  pathSelect.className = "planner-opt-select";
+  pathSelect.setAttribute("aria-label", "Pathing priority");
+  for (const [val, text] of [[0, "Off"], [1, "Low"], [2, "High"]]) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = text;
+    if (val === state.pathingPriority) opt.selected = true;
+    pathSelect.appendChild(opt);
+  }
+  pathSelect.addEventListener("change", () => { state.pathingPriority = Number(pathSelect.value); });
+  g1.appendChild(pathSelect);
+
+  // Storage near door dropdown
+  const storLabel = elText("span", "Storage:", "planner-opt-setting-label");
+  g1.appendChild(storLabel);
+  const storSelect = document.createElement("select");
+  storSelect.className = "planner-opt-select";
+  storSelect.setAttribute("aria-label", "Storage door weight");
+  for (const [val, text] of [[0, "Off"], [1, "Low"], [2, "High"]]) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = text;
+    if (val === state.storageDoorWeight) opt.selected = true;
+    storSelect.appendChild(opt);
+  }
+  storSelect.addEventListener("change", () => { state.storageDoorWeight = Number(storSelect.value); });
+  g1.appendChild(storSelect);
+
+  // Min storage size number input
+  const minSzLabel = elText("span", "Min Size:", "planner-opt-setting-label");
+  g1.appendChild(minSzLabel);
+  const minSzInput = document.createElement("input");
+  minSzInput.type = "number";
+  minSzInput.className = "planner-opt-select";
+  minSzInput.setAttribute("aria-label", "Minimum storage size");
+  minSzInput.min = "0";
+  minSzInput.value = String(state.minStorageSize);
+  minSzInput.style.width = "5ch";
+  minSzInput.addEventListener("change", () => { state.minStorageSize = Math.max(0, Number(minSzInput.value) || 0); });
+  g1.appendChild(minSzInput);
 
   actionsRow.appendChild(g1);
 

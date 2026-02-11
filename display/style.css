@@ -2988,6 +2988,15 @@ body:has(.focus-bar) #breadcrumb-bar {
   margin-left: 2px;
   cursor: pointer;
 }
+input[type="number"].planner-opt-select {
+  width: 5ch;
+  padding-right: 2px;
+  -moz-appearance: textfield;
+}
+input[type="number"].planner-opt-select::-webkit-inner-spin-button {
+  opacity: 1;
+  margin-left: 2px;
+}
 .planner-opt-select:hover {
   border-color: var(--border-medium);
 }

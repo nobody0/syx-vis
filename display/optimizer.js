@@ -823,10 +823,18 @@ function analyzePhase(ctx) {
     }));
     const maxDensity = Math.max(...densities.map(d => d.density), 0);
     const heroThreshold = maxDensity * 0.85;
-    const heroItems = densities.filter(d => d.density >= heroThreshold && d.density > 0)
+    let heroItems = densities.filter(d => d.density >= heroThreshold && d.density > 0)
       .sort((a, b) => b.density - a.density || a.tileCount - b.tileCount);
-    const fillerItems = densities.filter(d => d.density < heroThreshold || d.density === 0)
+    let fillerItems = densities.filter(d => d.density < heroThreshold || d.density === 0)
       .sort((a, b) => a.tileCount - b.tileCount);
+
+    // Apply min storage size — exclude undersized items (keep at least one fallback)
+    if (isStorage && ctx.minStorageSize > 0) {
+      const hf = heroItems.filter(d => d.tileCount >= ctx.minStorageSize);
+      const ff = fillerItems.filter(d => d.tileCount >= ctx.minStorageSize);
+      if (hf.length > 0 || ff.length > 0) { heroItems = hf; fillerItems = ff; }
+    }
+
     const bestHeroIdx = heroItems.length > 0 ? heroItems[0].ii : -1;
 
     ctx.groupInfo.push({
@@ -1169,8 +1177,11 @@ function _placeBestFittingItem(ctx, strip, row, col) {
   const rots = [strip.rotation];
 
   // Collect items with same rotation and sort by multiplier descending
+  const gInfo = ctx.groupInfoMap.get(strip.groupIdx);
+  const minSz = (gInfo?.isStorage && ctx.minStorageSize > 0) ? ctx.minStorageSize : 0;
   const candidates = [];
   for (let ii = 0; ii < items.length; ii++) {
+    if (minSz > 0 && countItemTiles(items[ii]) < minSz) continue;
     const tiles = getCachedTiles(ctx, strip.groupIdx, ii, strip.rotation);
     // Must have compatible height with the strip
     if (tiles.length !== strip.height) continue;
@@ -1206,11 +1217,14 @@ function fillWithStrips(ctx, strip, horizontal, rect, skipSet) {
   const { minR, minC, maxR, maxC } = rect;
   const group = ctx.furnitureSet.groups[strip.groupIdx];
   const rots = getAllowedRotations(group);
+  const gInfoS = ctx.groupInfoMap.get(strip.groupIdx);
+  const minSzS = (gInfoS?.isStorage && ctx.minStorageSize > 0) ? ctx.minStorageSize : 0;
 
   // Collect items sorted by multiplier descending for each compatible rotation
   function getItemsByHeight(targetHeight, rot) {
     const items = [];
     for (let ii = group.items.length - 1; ii >= 0; ii--) {
+      if (minSzS > 0 && countItemTiles(group.items[ii]) < minSzS) continue;
       const tiles = getCachedTiles(ctx, strip.groupIdx, ii, rot);
       if (tiles.length === targetHeight) items.push(ii);
     }
@@ -1599,6 +1613,15 @@ function placeMandatoryItems(ctx) {
     // Use smallest item for mandatory placements
     const items = [...group.items.keys()].sort((a, b) => countItemTiles(group.items[a]) - countItemTiles(group.items[b]));
 
+    // Apply min storage size — filter out items smaller than configured minimum
+    if (gInfo.isStorage && ctx.minStorageSize > 0 && items.length > 1) {
+      const filtered = items.filter(ii => countItemTiles(group.items[ii]) >= ctx.minStorageSize);
+      if (filtered.length > 0) {
+        items.length = 0;
+        items.push(...filtered);
+      }
+    }
+
     for (const ii of items) {
       if (countGroupPlacements(ctx, gi) >= (group.min || 1)) break;
       for (const rot of rots) {
@@ -1701,19 +1724,39 @@ function scoreLayoutWithSymmetry(ctx) {
 }
 
 /**
- * Walk distance tiebreaker for final polish comparison only.
- * Returns 0–30 points based on avg/max walk distance normalized by room diagonal.
- * Safe in polishAndScore only (max 30 pts cannot flip primary stat winner: gap = 1000).
+ * Walk distance bonus, scaled by pathingPriority and storageDoorWeight configs.
+ * pp=0,sw=0: returns 0 (current default). pp=1: max 30 (tiebreaker). pp=2: max 3000 (~3 workers).
+ * sw=1: max 500 storage bias. sw=2: max 2000 storage bias (~2 workers).
  */
 function computeWalkBonus(ctx) {
   if (!ctx.furnitureSet.mustBeIndoors || ctx.doors.size === 0) return 0;
-  const avg = computeAvgWalkDistance(ctx, "work");
-  const max = computeMaxWalkDistance(ctx);
-  if (avg === Infinity || max === Infinity) return 0;
+  const pp = ctx.pathingPriority ?? 0;
+  const sw = ctx.storageDoorWeight ?? 0;
+  if (pp === 0 && sw === 0) return 0;
+
   const diag = Math.sqrt(ctx.gridW ** 2 + ctx.gridH ** 2);
-  const avgNorm = Math.max(0, 1 - avg / diag);
-  const maxNorm = Math.max(0, 1 - max / (diag * 2));
-  return avgNorm * 20 + maxNorm * 10;
+  let bonus = 0;
+
+  if (pp > 0) {
+    const avg = computeAvgWalkDistance(ctx, "work");
+    const max = computeMaxWalkDistance(ctx);
+    if (avg !== Infinity && max !== Infinity) {
+      const avgNorm = Math.max(0, 1 - avg / diag);
+      const maxNorm = Math.max(0, 1 - max / (diag * 2));
+      const base = avgNorm * 20 + maxNorm * 10;
+      bonus += base * (pp === 1 ? 1 : 100);
+    }
+  }
+
+  if (sw > 0) {
+    const avgS = computeAvgWalkDistance(ctx, "storage");
+    if (avgS !== Infinity) {
+      const avgSNorm = Math.max(0, 1 - avgS / diag);
+      bonus += avgSNorm * (sw === 1 ? 500 : 2000);
+    }
+  }
+
+  return bonus;
 }
 
 /**
@@ -2195,7 +2238,9 @@ async function localSearchPhase(ctx) {
   // Sub-pass F: Lightweight SA — escape local optima with temperature-based acceptance
   {
     const rng = ctx.rng;
-    let currentScore = scoreLayout(ctx);
+    const saWalkAware = (ctx.pathingPriority ?? 0) > 0 || (ctx.storageDoorWeight ?? 0) > 0;
+    const saScore = () => scoreLayout(ctx) + (saWalkAware ? computeWalkBonus(ctx) : 0);
+    let currentScore = saScore();
     let bestKnown = currentScore;
     let bestSnap = takeLightSnapshot(ctx);
     let currentSnap = takeLightSnapshot(ctx);
@@ -2394,6 +2439,12 @@ async function localSearchPhase(ctx) {
         if (group.items.length > 1) {
           const newII = Math.floor(rng() * group.items.length);
           if (newII !== p.itemIdx) {
+            // Don't downsize storage below configured minimum
+            const gInfoC = ctx.groupInfo[p.groupIdx];
+            if (gInfoC?.isStorage && ctx.minStorageSize > 0 &&
+                countItemTiles(group.items[newII]) < ctx.minStorageSize) {
+              traceEnd('ls:F-moveC'); continue;
+            }
             clearOccupancy(ctx, pi);
             const origII = p.itemIdx;
             p.itemIdx = newII;
@@ -2427,7 +2478,7 @@ async function localSearchPhase(ctx) {
       // Evaluate
       traceStart('ls:F-eval');
       const walkOk = checkWalkability(ctx) && hasAnyDoorCandidate(ctx);
-      const newScore = walkOk ? scoreLayout(ctx) : -Infinity;
+      const newScore = walkOk ? saScore() : -Infinity;
       const delta = newScore - currentScore;
 
       if (delta > 0 || (temp > 0 && Math.exp(delta / temp) > rng())) {
@@ -2819,6 +2870,8 @@ function walkPolishPhase(ctx) {
   if (!ctx.furnitureSet.mustBeIndoors || ctx.doors.size === 0) return;
   const { gridW, gridH } = ctx;
   const preScore = scoreLayout(ctx);
+  const workSlack = ctx.pathingPriority === 2 ? 2000 : 0;
+  const storageSlack = ctx.storageDoorWeight === 2 ? 1000 : 0;
 
   // Sub-pass W1: Shift pieces adjacent to worst-distance tiles
   for (let round = 0; round < 3; round++) {
@@ -2875,7 +2928,7 @@ function walkPolishPhase(ctx) {
         if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
         if (fits) {
           setOccupancy(ctx, pi);
-          if (scoreLayout(ctx) >= preScore && checkWalkability(ctx)) {
+          if (scoreLayout(ctx) >= preScore - workSlack && checkWalkability(ctx)) {
             const newAvg = computeAvgWalkDistance(ctx, "work");
             if (newAvg < preAvg) { anyMoved = true; break; }
           }
@@ -2950,7 +3003,7 @@ function walkPolishPhase(ctx) {
         if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
         if (fits) {
           setOccupancy(ctx, pi);
-          if (scoreLayout(ctx) >= preScore && checkWalkability(ctx)) {
+          if (scoreLayout(ctx) >= preScore - workSlack && checkWalkability(ctx)) {
             const newAvg = computeAvgWalkDistance(ctx, "work");
             if (newAvg < preAvg) { anyMoved = true; break; }
           }
@@ -2961,6 +3014,155 @@ function walkPolishPhase(ctx) {
       }
     }
     if (!anyMoved) break;
+  }
+
+  // Sub-pass W3+W4: Storage-targeted passes (same structure as W1+W2 but for storage)
+  if ((ctx.storageDoorWeight ?? 0) > 0) {
+    // W3: Shift pieces adjacent to worst storage-distance tiles
+    for (let round = 0; round < 3; round++) {
+      const dist = computeDoorBFS(ctx);
+      let maxDist = 0;
+      for (let r = 0; r < gridH; r++)
+        for (let c = 0; c < gridW; c++)
+          if (dist[r][c] > maxDist) maxDist = dist[r][c];
+      if (maxDist <= 2) break;
+
+      const threshold = Math.max(maxDist - 2, Math.floor(maxDist * 0.7));
+      const candidatePIs = new Set();
+      for (let r = 0; r < gridH; r++)
+        for (let c = 0; c < gridW; c++) {
+          if (dist[r][c] < threshold) continue;
+          for (const [dr, dc] of DIRS) {
+            const nr = r + dr, nc = c + dc;
+            if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW) {
+              const pi = ctx.occupancy[nr][nc];
+              if (pi >= ctx.lockedCount && pi < ctx.placements.length) candidatePIs.add(pi);
+            }
+          }
+        }
+      if (candidatePIs.size === 0) break;
+
+      // Only include storage-group placements
+      const storagePIs = [...candidatePIs].filter(pi => {
+        const gInfo = ctx.groupInfo[ctx.placements[pi].groupIdx];
+        return gInfo?.isStorage;
+      });
+      if (storagePIs.length === 0) break;
+
+      storagePIs.sort((a, b) => {
+        const pa = ctx.placements[a], pb = ctx.placements[b];
+        const ma = ctx.furnitureSet.groups[pa.groupIdx].items[pa.itemIdx].multiplier ?? 1;
+        const mb = ctx.furnitureSet.groups[pb.groupIdx].items[pb.itemIdx].multiplier ?? 1;
+        return ma - mb;
+      });
+
+      let anyMoved = false;
+      const preAvgS = computeAvgWalkDistance(ctx, "storage");
+      for (const pi of storagePIs) {
+        const p = ctx.placements[pi];
+        const origRow = p.row, origCol = p.col;
+        for (const [sr, sc] of DIRS) {
+          clearOccupancy(ctx, pi);
+          p.row = origRow + sr; p.col = origCol + sc;
+          const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+          let fits = true;
+          for (let r = 0; r < tiles.length && fits; r++)
+            for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+              if (tiles[r][c] === null) continue;
+              const gr = p.row + r, gc = p.col + c;
+              if (gr < 0 || gr >= gridH || gc < 0 || gc >= gridW || !ctx.room[gr][gc]) fits = false;
+              else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+            }
+          if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
+          if (fits) {
+            setOccupancy(ctx, pi);
+            if (scoreLayout(ctx) >= preScore - storageSlack && checkWalkability(ctx)) {
+              const newAvgS = computeAvgWalkDistance(ctx, "storage");
+              if (newAvgS < preAvgS) { anyMoved = true; break; }
+            }
+            clearOccupancy(ctx, pi);
+          }
+          p.row = origRow; p.col = origCol;
+          setOccupancy(ctx, pi);
+        }
+      }
+      if (!anyMoved) break;
+    }
+
+    // W4: Slide storage pieces toward nearest door
+    const doorPositions2 = [];
+    for (const key of ctx.doors) {
+      const [dr, dc] = key.split(",").map(Number);
+      doorPositions2.push([dr, dc]);
+    }
+    if (doorPositions2.length > 0) {
+      for (let round = 0; round < 2; round++) {
+        let anyMoved = false;
+        const preAvgS = computeAvgWalkDistance(ctx, "storage");
+        const piDist = [];
+        for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
+          const p = ctx.placements[pi];
+          const gInfo = ctx.groupInfo[p.groupIdx];
+          if (!gInfo?.isStorage) continue;
+          const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+          let cr = 0, cc = 0, cnt = 0;
+          for (let r = 0; r < tiles.length; r++)
+            for (let c = 0; c < (tiles[r]?.length ?? 0); c++)
+              if (tiles[r][c] !== null) { cr += p.row + r; cc += p.col + c; cnt++; }
+          if (cnt === 0) continue;
+          cr /= cnt; cc /= cnt;
+          let minDoor = Infinity;
+          for (const [dr, dc] of doorPositions2) {
+            const d = Math.abs(cr - dr) + Math.abs(cc - dc);
+            if (d < minDoor) minDoor = d;
+          }
+          piDist.push({ pi, cr, cc, dist: minDoor });
+        }
+        piDist.sort((a, b) => b.dist - a.dist);
+
+        for (const { pi, cr, cc } of piDist) {
+          const p = ctx.placements[pi];
+          let bestDr = 0, bestDc = 0, bestD = Infinity;
+          for (const [dr, dc] of doorPositions2) {
+            const d = Math.abs(cr - dr) + Math.abs(cc - dc);
+            if (d < bestD) { bestD = d; bestDr = dr; bestDc = dc; }
+          }
+          const sr = Math.sign(bestDr - cr), sc = Math.sign(bestDc - cc);
+          if (sr === 0 && sc === 0) continue;
+          const shifts = [];
+          if (sr !== 0 && sc !== 0) shifts.push([sr, sc]);
+          if (sr !== 0) shifts.push([sr, 0]);
+          if (sc !== 0) shifts.push([0, sc]);
+
+          const origRow = p.row, origCol = p.col;
+          for (const [shr, shc] of shifts) {
+            clearOccupancy(ctx, pi);
+            p.row = origRow + shr; p.col = origCol + shc;
+            const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+            let fits = true;
+            for (let r = 0; r < tiles.length && fits; r++)
+              for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+                if (tiles[r][c] === null) continue;
+                const gr = p.row + r, gc = p.col + c;
+                if (gr < 0 || gr >= gridH || gc < 0 || gc >= gridW || !ctx.room[gr][gc]) fits = false;
+                else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+              }
+            if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
+            if (fits) {
+              setOccupancy(ctx, pi);
+              if (scoreLayout(ctx) >= preScore - storageSlack && checkWalkability(ctx)) {
+                const newAvgS = computeAvgWalkDistance(ctx, "storage");
+                if (newAvgS < preAvgS) { anyMoved = true; break; }
+              }
+              clearOccupancy(ctx, pi);
+            }
+            p.row = origRow; p.col = origCol;
+            setOccupancy(ctx, pi);
+          }
+        }
+        if (!anyMoved) break;
+      }
+    }
   }
 }
 
@@ -4231,6 +4433,9 @@ function createContext(input) {
   ctx.userDoors = new Set(clonedDoors);
   ctx.keepShape = keepShape;
   ctx.maxDoors = maxDoors;
+  ctx.pathingPriority = input.pathingPriority || 0;
+  ctx.storageDoorWeight = input.storageDoorWeight || 0;
+  ctx.minStorageSize = input.minStorageSize || 0;
 
   return ctx;
 }
