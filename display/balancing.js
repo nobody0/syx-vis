@@ -60,9 +60,7 @@ function calculateChain(targetResource, targetRate) {
     if (!prods || prods.length === 0) return; // no producer — raw trade resource
 
     // Filter to active recipes (weight > 0)
-    const activeProds = prods.filter(p =>
-      p.building.id !== "_world_map" && getRecipeWeight(p.recipe.id) > 0
-    );
+    const activeProds = prods.filter(p => getRecipeWeight(p.recipe.id) > 0);
     if (activeProds.length === 0) {
       steps.push({
         warning: true,
@@ -251,7 +249,7 @@ function runCalculation(resourceId, rate, resultsDiv) {
     // Only show weight input when recipe has competing producers for any output
     const hasCompetition = s.recipe.outputs.some(out => {
       const prods = producers.get(out.resource);
-      return prods && prods.filter(p => p.building.id !== "_world_map").length > 1;
+      return prods && prods.length > 1;
     });
     const weightCell = hasCompetition
       ? `<input type="number" class="bal-weight-input" data-recipe-id="${s.recipe.id}" value="${curWeight}" min="0" step="0.5">`

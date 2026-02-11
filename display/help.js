@@ -19,7 +19,7 @@ const HELP_CONTENT = {
         <strong>The Layout</strong><br>
         The graph reads left to right: basic resources and extraction on the left, advanced production on the right.
         Rows are grouped into bands &mdash; materials at the top, civilian and services in the middle, military at the bottom.
-        The <strong>World Map</strong> node on the far left represents foraging and gathering.
+        Basic resources and extraction buildings appear on the left, advanced production chains on the right.
       </div>
       <div class="help-getting-started" style="margin-top:14px">
         <div class="help-section-label">Getting Started</div>

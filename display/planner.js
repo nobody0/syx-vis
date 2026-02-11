@@ -2514,7 +2514,11 @@ async function runAutoOptimize(btn) {
   }
 
   btn.disabled = true;
-  btn.textContent = "Optimizing...";
+  btn.classList.add("optimizing");
+  btn.textContent = "0%";
+
+  // Show overlay on grid
+  const overlay = createOptimizeOverlay();
 
   pushUndo();
 
@@ -2527,6 +2531,7 @@ async function runAutoOptimize(btn) {
       room: state.room.map(row => [...row]),
       placements: state.placements.map(p => ({ ...p })),
       doors: new Set(state.doors),
+      onProgress: (info) => updateOptimizeOverlay(overlay, btn, info),
     });
 
     state.room = result.room;
@@ -2551,8 +2556,50 @@ async function runAutoOptimize(btn) {
     undo(); // revert on error
   }
 
+  removeOptimizeOverlay(overlay);
+  btn.classList.remove("optimizing");
   btn.textContent = "Auto-Optimize";
   btn.disabled = false;
+}
+
+function createOptimizeOverlay() {
+  const overlay = el("div", "optimize-overlay");
+  const card = el("div", "optimize-card");
+  const phase = el("div", "optimize-phase");
+  const detail = el("div", "optimize-detail");
+  const track = el("div", "optimize-track");
+  const fill = el("div", "optimize-fill");
+  const pct = el("div", "optimize-pct");
+
+  phase.textContent = "Preparing";
+  detail.textContent = "\u00A0";
+  pct.textContent = "0%";
+
+  track.appendChild(fill);
+  card.append(phase, detail, track, pct);
+  overlay.appendChild(card);
+  overlay._phase = phase;
+  overlay._detail = detail;
+  overlay._fill = fill;
+  overlay._pct = pct;
+
+  // Place over the grid wrap (in the outer container, covering scrollbars)
+  if (gridOuter) gridOuter.appendChild(overlay);
+  return overlay;
+}
+
+function updateOptimizeOverlay(overlay, btn, info) {
+  if (!overlay) return;
+  const pct = Math.round(info.progress * 100);
+  overlay._fill.style.width = pct + "%";
+  overlay._phase.textContent = info.phase;
+  overlay._detail.textContent = info.detail || "\u00A0";
+  overlay._pct.textContent = pct + "%";
+  btn.textContent = pct + "%";
+}
+
+function removeOptimizeOverlay(overlay) {
+  if (overlay && overlay.parentElement) overlay.parentElement.removeChild(overlay);
 }
 
 function updateOptimizeBtn() {
@@ -2694,6 +2741,7 @@ function buildSelector(container) {
 
 // Reference to grid parent for rebuild
 let gridParent = null;
+let gridOuter = null;  // wrapper around gridParent for overlay positioning
 
 
 function selectBuilding(buildingId) {
@@ -2830,8 +2878,10 @@ export function renderPlanner(container) {
   // Main layout: grid + sidebar
   const main = el("div", "planner-main");
 
+  const gridContainer = el("div", "planner-grid-outer");
   const gridWrap = el("div", "planner-grid-wrap");
   gridParent = gridWrap;
+  gridOuter = gridContainer;
   initRoom();
   buildGrid(gridWrap);
   // Auto-scroll to center of the 40x40 grid
@@ -2839,7 +2889,8 @@ export function renderPlanner(container) {
     gridWrap.scrollLeft = (gridWrap.scrollWidth - gridWrap.clientWidth) / 2;
     gridWrap.scrollTop = (gridWrap.scrollHeight - gridWrap.clientHeight) / 2;
   });
-  main.appendChild(gridWrap);
+  gridContainer.appendChild(gridWrap);
+  main.appendChild(gridContainer);
 
   const sidebar = el("div", "planner-sidebar");
   sidebarEl = sidebar;

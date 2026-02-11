@@ -1,5 +1,6 @@
 // Semantic layout: X = build-cost score, Y = category bands
 import { BAND_ORDER } from "../display/config.js";
+import { GATHERING_RATES } from "../derive/graph.js";
 
 // Layout constants
 export const COL_SPACING = 200;   // px between columns
@@ -54,7 +55,7 @@ export function computeLayout(nodes, edges, layoutEdges) {
   }
   for (const [id, score] of resourceScores) scores.set(id, score + 0.001);
 
-  // Step 5: Assign columns — alternating resource/building, World Map leftmost
+  // Step 5: Assign columns — alternating resource/building
   const columns = assignColumns(scores, nodes);
 
   // Pre-build adjacency map for barycenter sorting in positionNodes
@@ -78,6 +79,10 @@ export function computeLayout(nodes, edges, layoutEdges) {
     if (recipe && recipe.inputs.length === 0) {
       extractedResources.add(e.to);
     }
+  }
+  // Also mark gathered resources as extracted (formerly from World Map edges)
+  for (const resId of Object.keys(GATHERING_RATES)) {
+    if (nodes.has(resId)) extractedResources.add(resId);
   }
 
   // Step 7: Assign bands
@@ -124,12 +129,19 @@ function computeProductionCosts(nodes, edges) {
     });
   }
 
+  // Inject virtual gathering producers (breaks construction-cost cycles)
+  for (const [resId, rate] of Object.entries(GATHERING_RATES)) {
+    if (!nodes.has(resId)) continue;
+    if (!producers.has(resId)) producers.set(resId, []);
+    producers.get(resId).push({ buildingId: null, inputs: [], outputAmount: rate });
+  }
+
   const costs = new Map();
   const computing = new Set(); // cycle detection
 
   function getCost(resourceId) {
     if (costs.has(resourceId)) return costs.get(resourceId);
-    if (computing.has(resourceId)) return 1000; // cycle fallback (shouldn't happen with World Map)
+    if (computing.has(resourceId)) return 1000; // cycle fallback
 
     computing.add(resourceId);
 
@@ -205,7 +217,6 @@ function computeBuildScore(building, productionCosts) {
  *   - Extraction (no inputs): pathCost = buildScore
  *   - Recipe with inputs: pathCost = buildScore + sum(resourceScore of each input)
  * resourceScore(R) = min(pathCost) across all producers.
- * Excludes World Map pseudo-building.
  * @param {Map<string, Object>} nodes
  * @param {import('../types.js').GraphEdge[]} edges
  * @param {Map<string, number>} buildScores
@@ -234,6 +245,13 @@ function computeResourceScores(nodes, edges, buildScores) {
       buildScore: bs,
       outputAmount: output ? output.amount : 1,
     });
+  }
+
+  // Inject virtual gathering producers (buildScore=1 matches (0+1)*(0+1)=1)
+  for (const [resId, rate] of Object.entries(GATHERING_RATES)) {
+    if (!nodes.has(resId)) continue;
+    if (!producers.has(resId)) producers.set(resId, []);
+    producers.get(resId).push({ buildingId: null, inputs: [], buildScore: 1, outputAmount: rate });
   }
 
   const scores = new Map();
@@ -282,8 +300,7 @@ function computeResourceScores(nodes, edges, buildScores) {
 
 /**
  * Assign nodes to alternating resource/building columns.
- * World Map is always column 0. Then score-aligned segments produce
- * a resource column followed by a building column per segment.
+ * Score-aligned segments produce a building column followed by a resource column per segment.
  * Empty columns are collapsed.
  * @param {Map<string, number>} scores
  * @param {Map<string, Object>} nodes
@@ -292,12 +309,8 @@ function computeResourceScores(nodes, edges, buildScores) {
 function assignColumns(scores, nodes) {
   const columns = new Map();
 
-  // World Map always at column 0
-  if (nodes.has("_world_map")) columns.set("_world_map", 0);
-
-  // Sort all non-World Map nodes by score
   const sorted = Array.from(scores.entries())
-    .filter(([id]) => nodes.has(id) && id !== "_world_map")
+    .filter(([id]) => nodes.has(id))
     .sort((a, b) => a[1] - b[1]);
 
   if (sorted.length === 0) return columns;
@@ -306,8 +319,8 @@ function assignColumns(scores, nodes) {
   const TARGET_SEGMENTS = 12;
   const segSize = Math.max(1, Math.ceil(sorted.length / TARGET_SEGMENTS));
 
-  // Assign columns: within each segment, resources first, then buildings
-  let col = 1; // start after World Map
+  // Assign columns: within each segment, buildings first, then resources
+  let col = 0;
 
   for (let segStart = 0; segStart < sorted.length; segStart += segSize) {
     const segEnd = Math.min(segStart + segSize, sorted.length);

@@ -2295,8 +2295,8 @@ function openDetailForNode(d) {
     .attr("title", "Show only this node's dependency chain (F)")
     .on("click", () => enterFocusMode(d.id));
 
-  // Building state buttons (Built / Ignored) — World Map is always built, no toggle
-  if (d.type === "building" && d.id !== "world_map") {
+  // Building state buttons (Built / Ignored)
+  if (d.type === "building") {
     const bStateRow = panel.append("div").attr("class", "detail-state-row");
     const bStateOptions = [
       { key: "built", label: "Built", tooltip: "Mark as built \u2014 its recipe outputs become available resources" },
@@ -3228,9 +3228,13 @@ function showOnboarding() {
     dismissOnboarding();
   });
 
-  // Pulse the World Map node
-  const worldMapEntry = nodeGfxMap.get("world_map");
-  if (worldMapEntry) doHighlightPulse(worldMapEntry);
+  // Pulse the first extraction building as an onboarding hint
+  for (const [_id, entry] of nodeGfxMap) {
+    if (entry.data.category === "extraction" && entry.data.type === "building") {
+      doHighlightPulse(entry);
+      break;
+    }
+  }
 }
 
 function dismissOnboarding() {

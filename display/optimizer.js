@@ -190,11 +190,18 @@ function _hasAnyDoorCandidateImpl(ctx) {
   return false;
 }
 
-// ── Async yield ──────────────────────────────────────────
+// ── Async yield + progress ───────────────────────────────
+/** @type {((info: {phase: string, detail: string, progress: number}) => void)|null} */
+let _progressCb = null;
+
 function yieldToUI() {
   if (typeof window === 'undefined') return Promise.resolve();
   if (typeof scheduler !== 'undefined' && scheduler.yield) return scheduler.yield();
   return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+function reportProgress(phase, detail, progress) {
+  if (_progressCb) _progressCb({ phase, detail, progress: Math.min(1, Math.max(0, progress)) });
 }
 
 // ── Performance tracing ─────────────────────────────────
@@ -2487,10 +2494,12 @@ export async function runOptimizer(input) {
   const ctx = createContext(input);
   if (!ctx) return input;
 
+  _progressCb = input.onProgress || null;
   _traceEnabled = !!input.trace;
   _traces.length = 0;
 
   // Phase 0: Analysis & precomputation
+  reportProgress('Analyzing', 'Preparing room', 0);
   traceStart('analyzePhase');
   analyzePhase(ctx);
   traceEnd('analyzePhase');
@@ -2507,6 +2516,7 @@ export async function runOptimizer(input) {
   const initialSnapshot = takeLightSnapshot(ctx);
 
   // Strategy A: Strip-based filling
+  reportProgress('Searching', 'Strip layout', 0.02);
   traceStart('strategy:strip');
   restoreLightSnapshot(ctx, initialSnapshot);
   const stripResult = await runStrategy(ctx, (c) => stripFillPhase(c));
@@ -2567,8 +2577,18 @@ export async function runOptimizer(input) {
     );
   }
 
+  // Compute total strategies for progress (1 strip + constructive + deferred)
+  const hasSecondary = (ctx.empIdx >= 0 && ctx.effIdx >= 0) || ctx.relativeIndices.length > 0;
+  const deferredCount = (hasSecondary && !isLargeRoom) ? 8 : 0;
+  const totalStrategies = 1 + constructiveConfigs.length + deferredCount;
+  let strategiesDone = 1; // strip already done
+  // Strategies span 0.02–0.70 of progress
+  const STRAT_START = 0.02, STRAT_END = 0.70;
+
   traceStart('strategies:constructive');
   for (const config of constructiveConfigs) {
+    const p = STRAT_START + (STRAT_END - STRAT_START) * (strategiesDone / totalStrategies);
+    reportProgress('Searching', `Strategy ${strategiesDone + 1} / ${totalStrategies}`, p);
     traceStart('strategy:constructive');
     restoreLightSnapshot(ctx, initialSnapshot);
     const result = await runStrategy(ctx, (c) => constructivePass(c, config));
@@ -2577,6 +2597,7 @@ export async function runOptimizer(input) {
       bestSnapshot = result.snapshot;
     }
     traceEnd('strategy:constructive');
+    strategiesDone++;
   }
   traceEnd('strategies:constructive');
 
@@ -2586,7 +2607,6 @@ export async function runOptimizer(input) {
   // Deferred secondary strategies: place primary items without interleaved secondary items
   // (efficiency and/or relative), then place secondary items at end of pass.
   // Gives primary items maximum packing density.
-  const hasSecondary = (ctx.empIdx >= 0 && ctx.effIdx >= 0) || ctx.relativeIndices.length > 0;
   if (hasSecondary && !isLargeRoom) {
     const deferredConfigs = [
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false, deferSecondary: true },
@@ -2600,6 +2620,8 @@ export async function runOptimizer(input) {
     ];
     traceStart('strategies:deferred');
     for (const config of deferredConfigs) {
+      const p = STRAT_START + (STRAT_END - STRAT_START) * (strategiesDone / totalStrategies);
+      reportProgress('Searching', `Strategy ${strategiesDone + 1} / ${totalStrategies}`, p);
       traceStart('strategy:deferred');
       restoreLightSnapshot(ctx, initialSnapshot);
       const result = await runStrategy(ctx, (c) => constructivePass(c, config));
@@ -2608,6 +2630,7 @@ export async function runOptimizer(input) {
         bestSnapshot = result.snapshot;
       }
       traceEnd('strategy:deferred');
+      strategiesDone++;
     }
     traceEnd('strategies:deferred');
   }
@@ -2640,20 +2663,30 @@ export async function runOptimizer(input) {
   const candidates = [bestSnapshot];
   if (bestCoreSnapshot !== bestSnapshot) candidates.push(bestCoreSnapshot);
 
+  const totalPolish = polishSeeds.length * candidates.length;
+  let polishDone = 0;
+  // Polish spans 0.70–1.0 of progress
+  const POLISH_START = 0.70;
+
   let bestFinalScore = -Infinity;
   let bestFinalSnapshot = bestSnapshot;
   for (const seed of polishSeeds) {
     for (const snap of candidates) {
+      const p = POLISH_START + (1 - POLISH_START) * (polishDone / totalPolish);
+      reportProgress('Polishing', `Refinement ${polishDone + 1} / ${totalPolish}`, p);
       ctx.rng.restore(seed);
       const result = await polishAndScore(snap);
       if (result.score > bestFinalScore) {
         bestFinalScore = result.score;
         bestFinalSnapshot = result.snapshot;
       }
+      polishDone++;
     }
   }
   restoreSnapshot(ctx, bestFinalSnapshot);
 
+  reportProgress('Done', '', 1);
+  _progressCb = null;
   const trace = traceSummary();
   return { room: ctx.room, placements: ctx.placements, doors: ctx.doors, trace };
 }

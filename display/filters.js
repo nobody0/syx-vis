@@ -1,5 +1,6 @@
 // Filter panel: search autocomplete, category toggles, cost edge toggles, resource state grid
 import { RESOURCE_COLORS, BAND_COLORS, capitalize } from "./config.js";
+import { GATHERING_RATES } from "../derive/graph.js";
 
 // Filter state
 const filterState = {
@@ -109,7 +110,7 @@ export function getActiveCityName() {
 }
 
 /**
- * Create a new city and switch to it. World Map is auto-built.
+ * Create a new city and switch to it.
  * @param {string} name
  * @returns {string} cityId
  */
@@ -119,7 +120,7 @@ export function createCity(name) {
   data.cities.push({
     id,
     name,
-    buildingStates: { world_map: "built" },
+    buildingStates: {},
     recipeStates: {},
     resourceStates: {},
   });
@@ -127,7 +128,6 @@ export function createCity(name) {
   _saveCities(data);
   // Load into filterState
   filterState.buildingStates.clear();
-  filterState.buildingStates.set("world_map", "built");
   filterState.recipeStates.clear();
   filterState.resourceStates.clear();
   return id;
@@ -186,7 +186,6 @@ export function switchCity(cityId) {
       filterState.buildingStates.set(id, state);
     }
   }
-  filterState.buildingStates.set("world_map", "built"); // always built
   if (city.resourceStates) {
     for (const [id, state] of Object.entries(city.resourceStates)) {
       if (state === "produced") continue; // migration
@@ -214,7 +213,7 @@ export function importCity(name, buildingStates, resourceStates) {
     _saveCityStates(data.activeCityId);
   }
   const id = "city_" + Date.now();
-  const bStates = { world_map: "built", ...buildingStates };
+  const bStates = { ...buildingStates };
   data.cities.push({
     id,
     name,
@@ -305,7 +304,6 @@ loadFilterState();
           filterState.recipeStates.set(id, weight);
         }
       }
-      filterState.buildingStates.set("world_map", "built"); // always built
     }
   }
 }
@@ -317,7 +315,6 @@ loadFilterState();
  * @param {string|null} state - "built"|"ignored"|null
  */
 export function setBuildingState(id, state) {
-  if (id === "world_map") return; // World Map is always built
   if (state) {
     filterState.buildingStates.set(id, state);
   } else {
@@ -339,7 +336,6 @@ export function getBuildingStates() {
 
 export function clearAllBuildingStates() {
   filterState.buildingStates.clear();
-  filterState.buildingStates.set("world_map", "built");
 }
 
 // ── Resource state API (exported for render.js) ──
@@ -377,6 +373,10 @@ export function isShowFiltered() {
  */
 export function getAvailableResources(fullNodes, fullEdges) {
   const available = new Set();
+  // Gathered resources are always available (world map foraging)
+  for (const resId of Object.keys(GATHERING_RATES)) {
+    available.add(resId);
+  }
   // Bought resources
   for (const [id, state] of filterState.resourceStates) {
     if (state === "bought") available.add(id);
@@ -485,7 +485,6 @@ export function clearAllResourceStates() {
 
 export function clearAllStates() {
   filterState.buildingStates.clear();
-  filterState.buildingStates.set("world_map", "built");
   filterState.resourceStates.clear();
 }
 
@@ -931,7 +930,6 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
     const clearBtn = elText("button", "Clear All", "active-states-clear");
     clearBtn.addEventListener("click", () => {
       filterState.buildingStates.clear();
-      filterState.buildingStates.set("world_map", "built"); // always built
       filterState.resourceStates.clear();
       refreshActiveStates();
       fire();
@@ -1042,7 +1040,6 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
     filterState.edgeMode = "construction";
     filterState.showFiltered = false;
     filterState.buildingStates.clear();
-    filterState.buildingStates.set("world_map", "built"); // always built
     filterState.resourceStates.clear();
     filterState.recipeStates.clear();
 

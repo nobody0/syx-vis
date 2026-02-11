@@ -29,7 +29,7 @@ export {};
  * @property {string} name
  * @property {RecipeItem[]} inputs
  * @property {RecipeItem[]} outputs
- * @property {string} [source] - "curated" for World Map recipes
+ * @property {string} [source] - origin tag (e.g. "curated")
  * @property {boolean} [manual] - true for cannibal recipes
  */
 
