@@ -172,6 +172,7 @@ export function createRoomContext(furnitureSet, building, room, placements, grid
     mustReachCache: null, mustReachDirty: true,
     stabilityDirty: true,
     _walkabilityValid: false,
+    _connectivityVerified: false,
     _doorCandidateCache: undefined,
     groupCounts: null,
     // Stamp buffers for canPlaceFast (zero-allocation placement checks)
@@ -228,6 +229,7 @@ export function buildOccupancyGrid(ctx) {
   ctx.stabilityDirty = true;
   ctx.mustReachDirty = true;
   ctx._walkabilityValid = false;
+  ctx._connectivityVerified = false;
   // Rebuild freeBitmap: room tile AND unoccupied
   if (ctx.freeBitmap) {
     const fb = ctx.freeBitmap;
@@ -275,6 +277,7 @@ export function rebuildOccupancyInPlace(ctx) {
   ctx.stabilityDirty = true;
   ctx.mustReachDirty = true;
   ctx._walkabilityValid = false;
+  ctx._connectivityVerified = false;
   // Rebuild freeBitmap
   if (ctx.freeBitmap) {
     const fb = ctx.freeBitmap;
@@ -290,7 +293,7 @@ export function setOccupancy(ctx, pi) {
   const fs = ctx.furnitureSet;
   const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
   let overlap = false;
-  let addedBlockers = false;
+  let addedBlockers = false, addedMR = false;
   for (let r = 0; r < tiles.length; r++) {
     for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
       const tileKey = tiles[r][c];
@@ -305,11 +308,11 @@ export function setOccupancy(ctx, pi) {
       if (ctx.freeBitmap) ctx.freeBitmap[gr * ctx.gridW + gc] = 0;
       const tt = fs.tileTypes[tileKey];
       if (tt && AVAIL_IMPASSABLE.has(tt.availability)) { ctx.blockerCount[gr][gc]++; addedBlockers = true; }
-      if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 1;
+      if (tt?.mustBeReachable) { ctx.mustReachGrid[gr * ctx.gridW + gc] = 1; addedMR = true; }
     }
   }
   ctx.statsDirty = true;
-  ctx.mustReachDirty = true;
+  if (addedMR) ctx.mustReachDirty = true;
   if (addedBlockers) ctx._walkabilityValid = false;
   return !overlap;
 }
@@ -319,7 +322,7 @@ export function clearOccupancy(ctx, pi) {
   const p = ctx.placements[pi];
   const fs = ctx.furnitureSet;
   const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
-  let removedBlockers = false;
+  let removedBlockers = false, removedMR = false;
   for (let r = 0; r < tiles.length; r++) {
     for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
       const tileKey = tiles[r][c];
@@ -333,13 +336,14 @@ export function clearOccupancy(ctx, pi) {
           if (ctx.freeBitmap && ctx.room[gr][gc]) ctx.freeBitmap[gr * ctx.gridW + gc] = 1;
           const tt = fs.tileTypes[tileKey];
           if (tt && AVAIL_IMPASSABLE.has(tt.availability)) { ctx.blockerCount[gr][gc]--; removedBlockers = true; }
-          if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 0;
+          if (tt?.mustBeReachable) { ctx.mustReachGrid[gr * ctx.gridW + gc] = 0; removedMR = true; }
         }
       }
     }
   }
   ctx.statsDirty = true;
-  ctx.mustReachDirty = true;
+  if (removedMR) ctx.mustReachDirty = true;
+  ctx._connectivityVerified = false;
   if (removedBlockers) ctx._walkabilityValid = false;
 }
 
@@ -570,7 +574,7 @@ export function canPlace(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
  * Same logic as canPlace but uses ctx._cp* stamp buffers instead of Set/Array.
  * For optimizer hot paths only; canPlace/canPlaceWithReason stay for UI.
  */
-export function canPlaceFast(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
+export function canPlaceFast(ctx, groupIdx, itemIdx, rotation, row, col, skipPi, skipBFS) {
   const { furnitureSet: fs, gridW, gridH, room, occupancy } = ctx;
   const tiles = getCachedTiles(ctx, groupIdx, itemIdx, rotation);
   if (tiles.length === 0) return false;
@@ -735,7 +739,10 @@ export function canPlaceFast(ctx, groupIdx, itemIdx, rotation, row, col, skipPi)
     }
 
     // Connectivity check using stamp-based blocker iteration
-    if (wouldDisconnectRoomOpt(ctx, bBuf, bStamp, tCount, skipPi)) return false;
+    if (!skipBFS) {
+      if (wouldDisconnectRoomOpt(ctx, bBuf, bStamp, tCount, skipPi)) return false;
+      ctx._connectivityVerified = true;
+    }
   }
 
   return true;
@@ -905,6 +912,40 @@ export function checkWalkability(ctx) {
     ctx.mustReachDirty = false;
   }
 
+  // Light path: connectivity already verified by canPlaceFast BFS
+  if (ctx._connectivityVerified) {
+    ctx._connectivityVerified = false;
+    // mustBeReachable: adjacent to non-blocked room tile?
+    for (const { row, col } of mustReach) {
+      let ok = false;
+      for (const [dr, dc] of DIRS) {
+        const nr = row + dr, nc = col + dc;
+        if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
+            && room[nr][nc] && blockerCount[nr][nc] === 0) { ok = true; break; }
+      }
+      if (!ok) return false;
+    }
+    // Piece reachability: any tile adjacent to non-blocked room tile?
+    for (const p of placements) {
+      const pTiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+      let pieceOk = false;
+      for (let r = 0; r < pTiles.length && !pieceOk; r++)
+        for (let c = 0; c < (pTiles[r]?.length ?? 0) && !pieceOk; c++) {
+          if (pTiles[r][c] === null) continue;
+          const gr = p.row + r, gc = p.col + c;
+          for (const [dr, dc] of DIRS) {
+            const nr = gr + dr, nc = gc + dc;
+            if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
+                && room[nr][nc] && blockerCount[nr][nc] === 0) { pieceOk = true; break; }
+          }
+        }
+      if (!pieceOk) return false;
+    }
+    ctx._walkabilityValid = true;
+    return true;
+  }
+
+  // Full BFS path
   const v = freshVisited(ctx);
   const q = ctx.bfsQueue;
   q.reset();

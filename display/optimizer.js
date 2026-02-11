@@ -687,6 +687,40 @@ function analyzePhase(ctx) {
       }
   }
   ctx.maxItemDim = maxItemDim;
+
+  // Pre-allocate candidate arrays for top-K pattern (skipBFS scans)
+  const CAND_MAX = 64;
+  ctx._candMax = CAND_MAX;
+  ctx._candRot = new Int32Array(CAND_MAX);
+  ctx._candRow = new Int32Array(CAND_MAX);
+  ctx._candCol = new Int32Array(CAND_MAX);
+  ctx._candScore = new Float64Array(CAND_MAX);
+  ctx._candII = new Int32Array(CAND_MAX);
+  ctx._candCount = 0;
+}
+
+// ── Top-K candidate helpers ──────────────────────────────
+
+/** Reset candidate list. */
+function resetCandidates(ctx) { ctx._candCount = 0; }
+
+/** Insert candidate into top-K sorted list (descending by score). */
+function insertCandidate(ctx, rot, row, col, score, ii) {
+  const max = ctx._candMax;
+  let count = ctx._candCount;
+  if (count >= max && score <= ctx._candScore[count - 1]) return;
+  let pos = count < max ? count : count - 1;
+  while (pos > 0 && ctx._candScore[pos - 1] < score) pos--;
+  const end = count < max ? count : count - 1;
+  for (let i = end; i > pos; i--) {
+    ctx._candRot[i] = ctx._candRot[i-1]; ctx._candRow[i] = ctx._candRow[i-1];
+    ctx._candCol[i] = ctx._candCol[i-1]; ctx._candScore[i] = ctx._candScore[i-1];
+    ctx._candII[i] = ctx._candII[i-1];
+  }
+  ctx._candRot[pos] = rot; ctx._candRow[pos] = row;
+  ctx._candCol[pos] = col; ctx._candScore[pos] = score;
+  ctx._candII[pos] = ii;
+  if (count < max) ctx._candCount = count + 1;
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1585,25 +1619,27 @@ async function localSearchPhase(ctx) {
       for (const ii of candidates) {
         if (countGroupPlacements(ctx, gi) >= maxP) break;
         const currentScore = scoreLayout(ctx);
-        let bestPos = null, bestScore = currentScore;
+        resetCandidates(ctx);
         for (const rot of rots) {
           for (const { r, c } of ctx.roomTiles) {
             if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
+            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined, true)) continue;
             const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-            if (posScore > bestScore - currentScore) { bestScore = currentScore + posScore; bestPos = { rot, row: r, col: c }; }
+            insertCandidate(ctx, rot, r, c, posScore, ii);
           }
         }
-        if (bestPos) {
+        let gapPlaced = false;
+        for (let ci = 0; ci < ctx._candCount && !gapPlaced; ci++) {
+          if (!canPlaceFast(ctx, gi, ii, ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci], undefined)) continue;
           const pi = ctx.placements.length;
-          ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: bestPos.rot, row: bestPos.row, col: bestPos.col });
+          ctx.placements.push({ groupIdx: gi, itemIdx: ii, rotation: ctx._candRot[ci], row: ctx._candRow[ci], col: ctx._candCol[ci] });
           setOccupancy(ctx, pi);
           if (ctx.groupCounts) ctx.groupCounts[gi]++;
           if (!checkWalkability(ctx) || !hasAnyDoorCandidate(ctx) || scoreLayout(ctx) <= currentScore) {
             clearOccupancy(ctx, pi);
             if (ctx.groupCounts) ctx.groupCounts[gi]--;
             ctx.placements.pop();
-          } else { filled = true; }
+          } else { filled = true; gapPlaced = true; }
         }
       }
     }
@@ -1664,15 +1700,16 @@ async function localSearchPhase(ctx) {
             : 0;
           if (mult2 <= removedMult) continue;
           if (countGroupPlacements(ctx, gi2) >= maxP2) continue;
+          resetCandidates(ctx);
           for (const rot2 of rots2) {
-            let bestPos2 = null, bestScore2 = -Infinity;
             for (const { r, c } of ctx.roomTiles) {
               if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-              if (!canPlaceFast(ctx,gi2, ii2, rot2, r, c, undefined)) continue;
-              const s = scorePlacementPosition(ctx, gi2, ii2, rot2, r, c);
-              if (s > bestScore2) { bestScore2 = s; bestPos2 = { rot: rot2, row: r, col: c }; }
+              if (!canPlaceFast(ctx,gi2, ii2, rot2, r, c, undefined, true)) continue;
+              insertCandidate(ctx, rot2, r, c, scorePlacementPosition(ctx, gi2, ii2, rot2, r, c), ii2);
             }
-            if (bestPos2 && placeItem(ctx, gi2, ii2, bestPos2.rot, bestPos2.row, bestPos2.col)) { filled = true; break; }
+          }
+          for (let ci = 0; ci < ctx._candCount; ci++) {
+            if (placeItem(ctx, gi2, ii2, ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) { filled = true; break; }
           }
           if (filled) break;
         }
@@ -1689,16 +1726,17 @@ async function localSearchPhase(ctx) {
           const maxP2 = group2.max ?? 100;
           for (const ii2 of [...gInfo2.fillerItems, ...gInfo2.heroItems]) {
             if (countGroupPlacements(ctx, gi2) >= maxP2) break;
-            let bestPos2 = null, bestScore2 = -Infinity;
+            resetCandidates(ctx);
             for (const rot2 of rots2) {
               for (const { r, c } of ctx.roomTiles) {
                 if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-                if (!canPlaceFast(ctx,gi2, ii2, rot2, r, c, undefined)) continue;
-                const s = scorePlacementPosition(ctx, gi2, ii2, rot2, r, c);
-                if (s > bestScore2) { bestScore2 = s; bestPos2 = { rot: rot2, row: r, col: c }; }
+                if (!canPlaceFast(ctx,gi2, ii2, rot2, r, c, undefined, true)) continue;
+                insertCandidate(ctx, rot2, r, c, scorePlacementPosition(ctx, gi2, ii2, rot2, r, c), ii2);
               }
             }
-            if (bestPos2) placeItem(ctx, gi2, ii2, bestPos2.rot, bestPos2.row, bestPos2.col);
+            for (let ci = 0; ci < ctx._candCount; ci++) {
+              if (placeItem(ctx, gi2, ii2, ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) break;
+            }
           }
         }
       }
@@ -1833,20 +1871,21 @@ async function localSearchPhase(ctx) {
             const rMaxR = Math.min(ctx.gridH - 1, fMaxR + reinsMargin);
             const rMinC = Math.max(0, fMinC - reinsMargin);
             const rMaxC = Math.min(ctx.gridW - 1, fMaxC + reinsMargin);
-            let bestPos3 = null, bestScore3 = -Infinity, bestII3 = -1;
+            resetCandidates(ctx);
             for (const ii of itemCandidates) {
               for (const rot of rots) {
                 for (let r = rMinR; r <= rMaxR; r++) {
                   for (let c = rMinC; c <= rMaxC; c++) {
                     if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-                    if (!canPlaceFast(ctx,rem.groupIdx, ii, rot, r, c, undefined)) continue;
-                    const s = scorePlacementPosition(ctx, rem.groupIdx, ii, rot, r, c);
-                    if (s > bestScore3) { bestScore3 = s; bestPos3 = { rot, row: r, col: c }; bestII3 = ii; }
+                    if (!canPlaceFast(ctx,rem.groupIdx, ii, rot, r, c, undefined, true)) continue;
+                    insertCandidate(ctx, rot, r, c, scorePlacementPosition(ctx, rem.groupIdx, ii, rot, r, c), ii);
                   }
                 }
               }
             }
-            if (bestPos3 && bestII3 >= 0) placeItem(ctx, rem.groupIdx, bestII3, bestPos3.rot, bestPos3.row, bestPos3.col);
+            for (let ci = 0; ci < ctx._candCount; ci++) {
+              if (placeItem(ctx, rem.groupIdx, ctx._candII[ci], ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) break;
+            }
           }
         }
 
@@ -1863,18 +1902,19 @@ async function localSearchPhase(ctx) {
           for (const ii of [...gInfo2.heroItems, ...gInfo2.fillerItems]) {
             if (gapFilled >= GAP_FILL_MAX) break;
             if (countGroupPlacements(ctx, gi2) >= maxP2) break;
-            let bestPos = null, bestScore = -Infinity;
+            resetCandidates(ctx);
             for (const rot of rots2) {
               for (let r = bMinR; r <= bMaxR; r++) {
                 for (let c = bMinC; c <= bMaxC; c++) {
                   if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-                  if (!canPlaceFast(ctx,gi2, ii, rot, r, c, undefined)) continue;
-                  const s = scorePlacementPosition(ctx, gi2, ii, rot, r, c);
-                  if (s > bestScore) { bestScore = s; bestPos = { rot, row: r, col: c }; }
+                  if (!canPlaceFast(ctx,gi2, ii, rot, r, c, undefined, true)) continue;
+                  insertCandidate(ctx, rot, r, c, scorePlacementPosition(ctx, gi2, ii, rot, r, c), ii);
                 }
               }
             }
-            if (bestPos && placeItem(ctx, gi2, ii, bestPos.rot, bestPos.row, bestPos.col)) gapFilled++;
+            for (let ci = 0; ci < ctx._candCount; ci++) {
+              if (placeItem(ctx, gi2, ii, ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) { gapFilled++; break; }
+            }
           }
         }
         if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
@@ -2287,18 +2327,17 @@ async function gapFillPhase(ctx) {
       for (const ii of candidates) {
         if (countGroupPlacements(ctx, gi) >= maxP) break;
 
-        let bestPos = null, bestScore = -Infinity;
+        resetCandidates(ctx);
         for (const rot of rots) {
           for (const { r, c } of ctx.roomTiles) {
             if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
-            const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-            if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined, true)) continue;
+            insertCandidate(ctx, rot, r, c, scorePlacementPosition(ctx, gi, ii, rot, r, c), ii);
           }
         }
 
-        if (bestPos) {
-          if (placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) filled = true;
+        for (let ci = 0; ci < ctx._candCount; ci++) {
+          if (placeItem(ctx, gi, ii, ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) { filled = true; break; }
         }
       }
     }
@@ -2398,20 +2437,25 @@ async function constructivePass(ctx, options) {
           break;
         }
 
-        let bestPos = null, bestScore = -Infinity, bestII = -1;
+        resetCandidates(ctx);
         for (const ii of itemList) {
           if (ii < 0) continue;
           const rawMult = preferLarger ? (fs.groups[gi].items[ii]?.multiplierStats ?? fs.groups[gi].items[ii]?.multiplier ?? 1) : 1;
           for (const rot of rots) {
             for (const { r, c } of ctx.roomTiles) {
               if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-              if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
-              const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c) * rawMult;
-              if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; bestII = ii; }
+              if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined, true)) continue;
+              insertCandidate(ctx, rot, r, c, scorePlacementPosition(ctx, gi, ii, rot, r, c) * rawMult, ii);
             }
           }
         }
-        if (bestPos && bestII >= 0 && placeItem(ctx, gi, bestII, bestPos.rot, bestPos.row, bestPos.col)) {
+        let placed3m = false;
+        for (let ci = 0; ci < ctx._candCount; ci++) {
+          if (placeItem(ctx, gi, ctx._candII[ci], ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) {
+            placed3m = true; break;
+          }
+        }
+        if (placed3m) {
           placed++;
           placementCount++;
           keepGoing = true;
@@ -2431,16 +2475,21 @@ async function constructivePass(ctx, options) {
             break;
           }
 
-          let bestPos = null, bestScore = -Infinity;
+          resetCandidates(ctx);
           for (const rot of rots) {
             for (const { r, c } of ctx.roomTiles) {
               if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-              if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
-              const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-              if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+              if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined, true)) continue;
+              insertCandidate(ctx, rot, r, c, scorePlacementPosition(ctx, gi, ii, rot, r, c), ii);
             }
           }
-          if (bestPos && placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
+          let placed3 = false;
+          for (let ci = 0; ci < ctx._candCount; ci++) {
+            if (placeItem(ctx, gi, ii, ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) {
+              placed3 = true; break;
+            }
+          }
+          if (placed3) {
             placed++;
             placementCount++;
             keepGoing = true;
@@ -2473,16 +2522,21 @@ async function constructivePass(ctx, options) {
       let keepGoing = true;
       while (keepGoing && placed < maxP) {
         keepGoing = false;
-        let bestPos = null, bestScore = -Infinity;
+        resetCandidates(ctx);
         for (const rot of rots) {
           for (const { r, c } of ctx.roomTiles) {
             if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
-            const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
-            if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined, true)) continue;
+            insertCandidate(ctx, rot, r, c, scorePlacementPosition(ctx, gi, ii, rot, r, c), ii);
           }
         }
-        if (bestPos && placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
+        let placed3f = false;
+        for (let ci = 0; ci < ctx._candCount; ci++) {
+          if (placeItem(ctx, gi, ii, ctx._candRot[ci], ctx._candRow[ci], ctx._candCol[ci])) {
+            placed3f = true; break;
+          }
+        }
+        if (placed3f) {
           placed++;
           keepGoing = true;
           if (!deferSecondary && ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
