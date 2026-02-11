@@ -174,6 +174,17 @@ export function createRoomContext(furnitureSet, building, room, placements, grid
     _walkabilityValid: false,
     _doorCandidateCache: undefined,
     groupCounts: null,
+    // Stamp buffers for canPlaceFast (zero-allocation placement checks)
+    _cpBlockerBuf: new Uint32Array(gridW * gridH),
+    _cpBlockerStamp: 0,
+    _cpTileBuf: new Uint32Array(gridW * gridH),
+    _cpTileStamp: 0,
+    _cpTileList: new Int32Array(192),  // [gr, gc] × 96 tiles max
+    _cpTileCount: 0,
+    _cpCheckedBuf: new Uint32Array(512),  // indexed by placement index
+    _cpCheckedStamp: 0,
+    // Free-tile bitmap: 1 = room tile AND unoccupied, 0 = otherwise
+    freeBitmap: new Uint8Array(gridW * gridH),
   };
   ctx.occupancy = buildOccupancyGrid(ctx);
   return ctx;
@@ -217,7 +228,60 @@ export function buildOccupancyGrid(ctx) {
   ctx.stabilityDirty = true;
   ctx.mustReachDirty = true;
   ctx._walkabilityValid = false;
+  // Rebuild freeBitmap: room tile AND unoccupied
+  if (ctx.freeBitmap) {
+    const fb = ctx.freeBitmap;
+    for (let r = 0; r < gridH; r++)
+      for (let c = 0; c < gridW; c++)
+        fb[r * gridW + c] = (ctx.room[r][c] && grid[r][c] < 0) ? 1 : 0;
+  }
   return grid;
+}
+
+/**
+ * Rebuild occupancy grids in-place from placements — zero allocations.
+ * Same logic as buildOccupancyGrid but reuses existing grid arrays.
+ */
+export function rebuildOccupancyInPlace(ctx) {
+  const { gridW, gridH, placements, furnitureSet: fs } = ctx;
+  for (let r = 0; r < gridH; r++) {
+    ctx.occupancy[r].fill(-1);
+    ctx.blockerCount[r].fill(0);
+    ctx.groupGrid[r].fill(-1);
+  }
+  ctx.mustReachGrid.fill(0);
+  let occCount = 0;
+  for (let pi = 0; pi < placements.length; pi++) {
+    const p = placements[pi];
+    const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+    for (let r = 0; r < tiles.length; r++) {
+      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
+        const tileKey = tiles[r][c];
+        if (tileKey === null) continue;
+        const gr = p.row + r, gc = p.col + c;
+        if (gr >= 0 && gr < gridH && gc >= 0 && gc < gridW) {
+          if (ctx.occupancy[gr][gc] < 0) occCount++;
+          ctx.occupancy[gr][gc] = pi;
+          ctx.groupGrid[gr][gc] = p.groupIdx;
+          const tt = fs.tileTypes[tileKey];
+          if (tt && AVAIL_IMPASSABLE.has(tt.availability)) ctx.blockerCount[gr][gc]++;
+          if (tt?.mustBeReachable) ctx.mustReachGrid[gr * gridW + gc] = 1;
+        }
+      }
+    }
+  }
+  ctx.occupiedCount = occCount;
+  ctx.statsDirty = true;
+  ctx.stabilityDirty = true;
+  ctx.mustReachDirty = true;
+  ctx._walkabilityValid = false;
+  // Rebuild freeBitmap
+  if (ctx.freeBitmap) {
+    const fb = ctx.freeBitmap;
+    for (let r = 0; r < gridH; r++)
+      for (let c = 0; c < gridW; c++)
+        fb[r * gridW + c] = (ctx.room[r][c] && ctx.occupancy[r][c] < 0) ? 1 : 0;
+  }
 }
 
 /** Mark a placement's tiles as occupied in the occupancy grid. Returns false if overlap detected. */
@@ -237,6 +301,7 @@ export function setOccupancy(ctx, pi) {
       if (ctx.occupancy[gr][gc] < 0) ctx.occupiedCount++;
       ctx.occupancy[gr][gc] = pi;
       ctx.groupGrid[gr][gc] = p.groupIdx;
+      if (ctx.freeBitmap) ctx.freeBitmap[gr * ctx.gridW + gc] = 0;
       const tt = fs.tileTypes[tileKey];
       if (tt && AVAIL_IMPASSABLE.has(tt.availability)) ctx.blockerCount[gr][gc]++;
       if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 1;
@@ -263,6 +328,7 @@ export function clearOccupancy(ctx, pi) {
           ctx.occupancy[gr][gc] = -1;
           ctx.groupGrid[gr][gc] = -1;
           ctx.occupiedCount--;
+          if (ctx.freeBitmap && ctx.room[gr][gc]) ctx.freeBitmap[gr * ctx.gridW + gc] = 1;
           const tt = fs.tileTypes[tileKey];
           if (tt && AVAIL_IMPASSABLE.has(tt.availability)) ctx.blockerCount[gr][gc]--;
           if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 0;
@@ -495,6 +561,243 @@ export function canPlace(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
   }
 
   return true;
+}
+
+/**
+ * Fast canPlace using stamp buffers — zero allocations per call.
+ * Same logic as canPlace but uses ctx._cp* stamp buffers instead of Set/Array.
+ * For optimizer hot paths only; canPlace/canPlaceWithReason stay for UI.
+ */
+export function canPlaceFast(ctx, groupIdx, itemIdx, rotation, row, col, skipPi) {
+  const { furnitureSet: fs, gridW, gridH, room, occupancy } = ctx;
+  const tiles = getCachedTiles(ctx, groupIdx, itemIdx, rotation);
+  if (tiles.length === 0) return false;
+
+  // Advance stamps
+  ctx._cpBlockerStamp++;
+  if (ctx._cpBlockerStamp === 0) { ctx._cpBlockerBuf.fill(0); ctx._cpBlockerStamp = 1; }
+  ctx._cpTileStamp++;
+  if (ctx._cpTileStamp === 0) { ctx._cpTileBuf.fill(0); ctx._cpTileStamp = 1; }
+  const bStamp = ctx._cpBlockerStamp;
+  const bBuf = ctx._cpBlockerBuf;
+  const tStamp = ctx._cpTileStamp;
+  const tBuf = ctx._cpTileBuf;
+  let tCount = 0;
+  let blockerCount = 0;
+
+  for (let r = 0; r < tiles.length; r++) {
+    for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
+      const tileKey = tiles[r][c];
+      if (tileKey === null) continue;
+      const gr = row + r, gc = col + c;
+      if (gr < 0 || gr >= gridH || gc < 0 || gc >= gridW) return false;
+      if (!room[gr][gc]) return false;
+      const occ = occupancy[gr][gc];
+      if (occ >= 0 && occ !== skipPi) return false;
+      const key = gr * gridW + gc;
+      ctx._cpTileList[tCount * 2] = gr;
+      ctx._cpTileList[tCount * 2 + 1] = gc;
+      tBuf[key] = tStamp;
+      tCount++;
+      const tt = fs.tileTypes[tileKey];
+      if (tt && AVAIL_IMPASSABLE.has(tt.availability)) {
+        bBuf[key] = bStamp;
+        blockerCount++;
+      }
+    }
+  }
+
+  // Reserved tile check
+  if (ctx.reservedTiles?.size > 0) {
+    for (let i = 0; i < tCount; i++) {
+      const gr = ctx._cpTileList[i * 2], gc = ctx._cpTileList[i * 2 + 1];
+      const key = gr * gridW + gc;
+      if (!ctx.reservedTiles.has(key)) continue;
+      if (bBuf[key] === bStamp) return false;  // blocker on reserved tile
+    }
+  }
+
+  // mustBeReachable check (inline wouldBeFullyBlocked)
+  for (let i = 0; i < tCount; i++) {
+    const gr = ctx._cpTileList[i * 2], gc = ctx._cpTileList[i * 2 + 1];
+    const key = gr * gridW + gc;
+    // Get tileType from tileKey — re-derive from tiles grid
+    const lr = gr - row, lc = gc - col;
+    const tileKey = tiles[lr][lc];
+    const tt = fs.tileTypes[tileKey];
+    if (!tt?.mustBeReachable) continue;
+    let bc = 0;
+    for (const [dr, dc] of DIRS) {
+      const nr = gr + dr, nc = gc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW || !room[nr][nc]) { bc++; continue; }
+      // inline isBlockerAt with stamp
+      const nk = nr * gridW + nc;
+      if (bBuf[nk] === bStamp) { bc++; continue; }
+      const ntt = getFurnitureTileAt(ctx, nr, nc, skipPi);
+      if (ntt !== null && AVAIL_IMPASSABLE.has(ntt.availability)) bc++;
+    }
+    if (bc >= 4) return false;
+  }
+
+  // Don't fully block existing mustBeReachable tiles
+  for (let i = 0; i < tCount; i++) {
+    const gr = ctx._cpTileList[i * 2], gc = ctx._cpTileList[i * 2 + 1];
+    const key = gr * gridW + gc;
+    if (bBuf[key] !== bStamp) continue;  // not a blocker tile
+    for (const [dr, dc] of DIRS) {
+      const nr = gr + dr, nc = gc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      const existingTT = getFurnitureTileAt(ctx, nr, nc, skipPi);
+      if (!existingTT?.mustBeReachable) continue;
+      // inline wouldBeFullyBlocked with stamp
+      let bc2 = 0;
+      for (const [dr2, dc2] of DIRS) {
+        const nr2 = nr + dr2, nc2 = nc + dc2;
+        if (nr2 < 0 || nr2 >= gridH || nc2 < 0 || nc2 >= gridW || !room[nr2][nc2]) { bc2++; continue; }
+        const nk2 = nr2 * gridW + nc2;
+        if (bBuf[nk2] === bStamp) { bc2++; continue; }
+        const ntt2 = getFurnitureTileAt(ctx, nr2, nc2, skipPi);
+        if (ntt2 !== null && AVAIL_IMPASSABLE.has(ntt2.availability)) bc2++;
+      }
+      if (bc2 >= 4) return false;
+    }
+  }
+
+  // Piece perimeter reachability (using tBuf stamp for proposedSet, bBuf for blockers)
+  let hasWalkableNeighbor = false;
+  for (let i = 0; i < tCount && !hasWalkableNeighbor; i++) {
+    const gr = ctx._cpTileList[i * 2], gc = ctx._cpTileList[i * 2 + 1];
+    for (const [dr, dc] of DIRS) {
+      const nr = gr + dr, nc = gc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      if (!room[nr][nc]) continue;
+      const nk = nr * gridW + nc;
+      if (tBuf[nk] === tStamp) continue;  // part of proposed tiles
+      if (bBuf[nk] === bStamp) continue;   // proposed blocker
+      const ntt = getFurnitureTileAt(ctx, nr, nc, skipPi);
+      if (ntt !== null && AVAIL_IMPASSABLE.has(ntt.availability)) continue;
+      hasWalkableNeighbor = true;
+      break;
+    }
+  }
+  if (!hasWalkableNeighbor) return false;
+
+  // Don't enclose adjacent pieces
+  if (blockerCount > 0) {
+    ctx._cpCheckedStamp++;
+    if (ctx._cpCheckedStamp === 0) { ctx._cpCheckedBuf.fill(0); ctx._cpCheckedStamp = 1; }
+    // Grow buffer if needed
+    if (ctx._cpCheckedBuf.length < ctx.placements.length + 64) {
+      ctx._cpCheckedBuf = new Uint32Array(ctx.placements.length + 256);
+      ctx._cpCheckedStamp = 1;
+    }
+    const cStamp = ctx._cpCheckedStamp;
+    const cBuf = ctx._cpCheckedBuf;
+
+    for (let i = 0; i < tCount; i++) {
+      const gr = ctx._cpTileList[i * 2], gc = ctx._cpTileList[i * 2 + 1];
+      const key = gr * gridW + gc;
+      if (bBuf[key] !== bStamp) continue;  // only check blocker tiles
+      for (const [dr, dc] of DIRS) {
+        const nr = gr + dr, nc = gc + dc;
+        if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+        const adjPi = occupancy[nr][nc];
+        if (adjPi < 0 || adjPi === skipPi) continue;
+        if (cBuf[adjPi] === cStamp) continue;
+        cBuf[adjPi] = cStamp;
+        // inline pieceHasWalkableNeighbor with stamps
+        const ap = ctx.placements[adjPi];
+        if (!ap) continue;
+        const aTiles = getCachedTiles(ctx, ap.groupIdx, ap.itemIdx, ap.rotation);
+        let pieceWalkable = false;
+        for (let ar = 0; ar < aTiles.length && !pieceWalkable; ar++) {
+          for (let ac = 0; ac < (aTiles[ar]?.length ?? 0) && !pieceWalkable; ac++) {
+            if (aTiles[ar][ac] === null) continue;
+            const agr = ap.row + ar, agc = ap.col + ac;
+            for (const [dr2, dc2] of DIRS) {
+              const anr = agr + dr2, anc = agc + dc2;
+              if (anr < 0 || anr >= gridH || anc < 0 || anc >= gridW) continue;
+              if (!room[anr][anc]) continue;
+              const ank = anr * gridW + anc;
+              if (tBuf[ank] === tStamp) continue;
+              if (bBuf[ank] === bStamp) continue;
+              const antt = getFurnitureTileAt(ctx, anr, anc, skipPi);
+              if (antt !== null && AVAIL_IMPASSABLE.has(antt.availability)) continue;
+              pieceWalkable = true;
+              break;
+            }
+          }
+        }
+        if (!pieceWalkable) return false;
+      }
+    }
+
+    // Connectivity check using stamp-based blocker iteration
+    if (wouldDisconnectRoomOpt(ctx, bBuf, bStamp, tCount, skipPi)) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Optimized wouldDisconnectRoom that reads blocker positions from stamp buffer.
+ * Iterates _cpTileList to find which tiles are blockers via bBuf check.
+ */
+function wouldDisconnectRoomOpt(ctx, bBuf, bStamp, tCount, skipPi) {
+  const { gridW, gridH, room } = ctx;
+  ctx.blockedStamp++;
+  if (ctx.blockedStamp === 0) { ctx.blockedBuf.fill(0); ctx.blockedStamp = 1; }
+  const dStamp = ctx.blockedStamp;
+  const dBuf = ctx.blockedBuf;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (ctx.blockerCount[r][c] > 0) dBuf[r * gridW + c] = dStamp;
+  if (skipPi !== undefined && skipPi >= 0) {
+    const sp = ctx.placements[skipPi];
+    if (sp) {
+      const stiles = getCachedTiles(ctx, sp.groupIdx, sp.itemIdx, sp.rotation);
+      for (let r = 0; r < stiles.length; r++)
+        for (let c = 0; c < (stiles[r]?.length ?? 0); c++) {
+          if (stiles[r][c] === null) continue;
+          const gr = sp.row + r, gc = sp.col + c;
+          if (gr >= 0 && gr < gridH && gc >= 0 && gc < gridW) dBuf[gr * gridW + gc] = 0;
+        }
+    }
+  }
+  // Mark proposed blockers from stamp buffer
+  for (let i = 0; i < tCount; i++) {
+    const gr = ctx._cpTileList[i * 2], gc = ctx._cpTileList[i * 2 + 1];
+    const key = gr * gridW + gc;
+    if (bBuf[key] === bStamp) dBuf[key] = dStamp;
+  }
+
+  let totalOpen = 0, startR = -1, startC = -1;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c] && dBuf[r * gridW + c] !== dStamp) {
+        totalOpen++;
+        if (startR < 0) { startR = r; startC = c; }
+      }
+  if (totalOpen === 0) return false;
+
+  const v = freshVisited(ctx);
+  const q = ctx.bfsQueue;
+  q.reset();
+  q.push(startR, startC);
+  visitedSet(v, startR, startC);
+  let reached = 1;
+  while (q.length > 0) {
+    const [cr, cc] = q.shift();
+    for (const [dr, dc] of DIRS) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      if (visitedHas(v, nr, nc) || !room[nr][nc] || dBuf[nr * gridW + nc] === dStamp) continue;
+      visitedSet(v, nr, nc);
+      reached++;
+      q.push(nr, nc);
+    }
+  }
+  return reached < totalOpen;
 }
 
 /**

@@ -3,8 +3,8 @@ import {
   AVAIL_IMPASSABLE, getAllowedRotations, DIRS, DIRS8,
   SUPPORT_RADIUS, STABILITY_THRESHOLD,
   getCachedTiles,
-  createRoomContext, buildOccupancyGrid, setOccupancy, clearOccupancy,
-  canPlace, checkWalkability, checkRoomConnectivity,
+  createRoomContext, buildOccupancyGrid, rebuildOccupancyInPlace, setOccupancy, clearOccupancy,
+  canPlaceFast, checkWalkability, checkRoomConnectivity,
   computeStats, computeIsolation, tileSupport, countGroupPlacements,
 } from "./planner-core.js";
 
@@ -76,7 +76,7 @@ function takeLightSnapshot(ctx) {
 
 function restoreLightSnapshot(ctx, snap) {
   ctx.placements = snap.placements.map(p => ({ ...p }));
-  ctx.occupancy = buildOccupancyGrid(ctx);
+  rebuildOccupancyInPlace(ctx);
   rebuildGroupCounts(ctx);
   ctx._doorCandidateCache = undefined;
 }
@@ -193,7 +193,41 @@ function _hasAnyDoorCandidateImpl(ctx) {
 // ── Async yield ──────────────────────────────────────────
 function yieldToUI() {
   if (typeof window === 'undefined') return Promise.resolve();
+  if (typeof scheduler !== 'undefined' && scheduler.yield) return scheduler.yield();
   return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+// ── Performance tracing ─────────────────────────────────
+const _perf = (typeof performance !== 'undefined') ? performance : { now: Date.now, mark(){}, measure(){} };
+const _traces = [];
+let _traceEnabled = false;
+
+function traceStart(label) {
+  if (!_traceEnabled) return;
+  _perf.mark(label + ':start');
+}
+function traceEnd(label) {
+  if (!_traceEnabled) return;
+  _perf.mark(label + ':end');
+  try {
+    const m = _perf.measure(label, label + ':start', label + ':end');
+    _traces.push({ name: label, ms: m.duration });
+  } catch { /* ignore if marks missing */ }
+}
+function traceSummary() {
+  if (!_traceEnabled || _traces.length === 0) return null;
+  // Aggregate by name
+  const agg = new Map();
+  for (const t of _traces) {
+    const a = agg.get(t.name);
+    if (a) { a.calls++; a.totalMs += t.ms; a.maxMs = Math.max(a.maxMs, t.ms); }
+    else agg.set(t.name, { calls: 1, totalMs: t.ms, maxMs: t.ms });
+  }
+  // Sort by total time descending
+  const rows = [...agg.entries()]
+    .map(([name, a]) => ({ name, ...a, avgMs: a.totalMs / a.calls }))
+    .sort((a, b) => b.totalMs - a.totalMs);
+  return rows;
 }
 
 // ── Primary stat detection ───────────────────────────────
@@ -770,7 +804,7 @@ function findLargestRect(ctx) {
  * Place one item at the given position. Returns true if placed successfully.
  */
 function placeItem(ctx, groupIdx, itemIdx, rotation, row, col) {
-  if (!canPlace(ctx, groupIdx, itemIdx, rotation, row, col, undefined)) return false;
+  if (!canPlaceFast(ctx,groupIdx, itemIdx, rotation, row, col, undefined)) return false;
   const pi = ctx.placements.length;
   ctx.placements.push({ groupIdx, itemIdx, rotation, row, col });
   setOccupancy(ctx, pi);
@@ -1023,8 +1057,8 @@ function placeEfficiencyItems(ctx) {
         if (placed >= maxP) break;
         let bestPos = null, bestScore = -Infinity;
         for (const { r, c } of ctx.roomTiles) {
-          if (ctx.occupancy[r][c] >= 0) continue;
-          if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+          if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+          if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
           const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
           if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
         }
@@ -1070,8 +1104,8 @@ function placeRelativeItems(ctx) {
         if (placed >= maxP) break;
         let bestPos = null, bestScore = -Infinity;
         for (const { r, c } of ctx.roomTiles) {
-          if (ctx.occupancy[r][c] >= 0) continue;
-          if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+          if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+          if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
           const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
           if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
         }
@@ -1124,8 +1158,8 @@ function placeRelativeItemsSmallFirst(ctx) {
           keepGoing = false;
           let bestPos = null, bestScore = -Infinity;
           for (const { r, c } of ctx.roomTiles) {
-            if (ctx.occupancy[r][c] >= 0) continue;
-            if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+            if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
             const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
             if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
           }
@@ -1167,8 +1201,8 @@ function placeMandatoryItems(ctx) {
         if (countGroupPlacements(ctx, gi) >= (group.min || 1)) break;
         let bestPos = null, bestScore = -Infinity;
         for (const { r, c } of ctx.roomTiles) {
-          if (ctx.occupancy[r][c] >= 0) continue;
-          if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+          if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+          if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
           const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
           if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
         }
@@ -1257,6 +1291,7 @@ async function localSearchPhase(ctx) {
   const { furnitureSet: fs } = ctx;
   rebuildGroupCounts(ctx);
 
+  traceStart('ls:A-upgrade');
   // Sub-pass A: Upgrade — try replacing each item with a larger variant (+ shift offsets)
   const SHIFT_OFFSETS = [[0,0],[0,1],[0,-1],[1,0],[-1,0]];
   for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
@@ -1307,9 +1342,11 @@ async function localSearchPhase(ctx) {
       }
     }
   }
+  traceEnd('ls:A-upgrade');
 
   await yieldToUI();
 
+  traceStart('ls:A2-relUpgrade');
   // Sub-pass A2: Relative-aware upgrade — clear relative items, try ONE primary upgrade,
   // re-place relative items. Unlocks upgrades blocked by adjacent relative items (e.g. basins).
   if (ctx.relativeIndices.length > 0) {
@@ -1386,9 +1423,11 @@ async function localSearchPhase(ctx) {
 
     restoreLightSnapshot(ctx, bestA2Snap);
   }
+  traceEnd('ls:A2-relUpgrade');
 
   await yieldToUI();
 
+  traceStart('ls:B-squeeze');
   // Sub-pass B: Greedy squeeze — slide pieces toward centroid
   for (let round = 0; round < 3; round++) {
     let centR = 0, centC = 0, centN = 0;
@@ -1440,9 +1479,11 @@ async function localSearchPhase(ctx) {
     }
     if (!anyMoved) break;
   }
+  traceEnd('ls:B-squeeze');
 
   await yieldToUI();
 
+  traceStart('ls:C-rotate');
   // Sub-pass C: Neatness rotation+shift — try rotating each piece
   const A3_SHIFTS = [[0,0],[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
   for (let round = 0; round < 3; round++) {
@@ -1501,9 +1542,11 @@ async function localSearchPhase(ctx) {
     }
     if (!anyChanged) break;
   }
+  traceEnd('ls:C-rotate');
 
   await yieldToUI();
 
+  traceStart('ls:D-gapFill');
   // Sub-pass D: Gap fill with small items
   for (let pass = 0; pass < 3; pass++) {
     let filled = false;
@@ -1523,8 +1566,8 @@ async function localSearchPhase(ctx) {
         let bestPos = null, bestScore = currentScore;
         for (const rot of rots) {
           for (const { r, c } of ctx.roomTiles) {
-            if (ctx.occupancy[r][c] >= 0) continue;
-            if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+            if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
             const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
             if (posScore > bestScore - currentScore) { bestScore = currentScore + posScore; bestPos = { rot, row: r, col: c }; }
           }
@@ -1545,7 +1588,9 @@ async function localSearchPhase(ctx) {
     if (!filled) break;
     await yieldToUI();
   }
+  traceEnd('ls:D-gapFill');
 
+  traceStart('ls:E-repack');
   // Sub-pass E: Remove-and-repack — try removing small items to make room for bigger ones
   for (let round = 0; round < 3; round++) {
     let anyImproved = false;
@@ -1600,8 +1645,8 @@ async function localSearchPhase(ctx) {
           for (const rot2 of rots2) {
             let bestPos2 = null, bestScore2 = -Infinity;
             for (const { r, c } of ctx.roomTiles) {
-              if (ctx.occupancy[r][c] >= 0) continue;
-              if (!canPlace(ctx, gi2, ii2, rot2, r, c, undefined)) continue;
+              if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+              if (!canPlaceFast(ctx,gi2, ii2, rot2, r, c, undefined)) continue;
               const s = scorePlacementPosition(ctx, gi2, ii2, rot2, r, c);
               if (s > bestScore2) { bestScore2 = s; bestPos2 = { rot: rot2, row: r, col: c }; }
             }
@@ -1625,8 +1670,8 @@ async function localSearchPhase(ctx) {
             let bestPos2 = null, bestScore2 = -Infinity;
             for (const rot2 of rots2) {
               for (const { r, c } of ctx.roomTiles) {
-                if (ctx.occupancy[r][c] >= 0) continue;
-                if (!canPlace(ctx, gi2, ii2, rot2, r, c, undefined)) continue;
+                if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+                if (!canPlaceFast(ctx,gi2, ii2, rot2, r, c, undefined)) continue;
                 const s = scorePlacementPosition(ctx, gi2, ii2, rot2, r, c);
                 if (s > bestScore2) { bestScore2 = s; bestPos2 = { rot: rot2, row: r, col: c }; }
               }
@@ -1647,7 +1692,9 @@ async function localSearchPhase(ctx) {
     if (!anyImproved) break;
     await yieldToUI();
   }
+  traceEnd('ls:E-repack');
 
+  traceStart('ls:F-SA');
   // Sub-pass F: Lightweight SA — escape local optima with temperature-based acceptance
   {
     const rng = ctx.rng;
@@ -1658,11 +1705,17 @@ async function localSearchPhase(ctx) {
 
     const saIter = ctx.roomTiles.length > 500 ? 800 : 2000;
     const T0 = 3000;
+    let stateClean = true;
     for (let iter = 0; iter < saIter; iter++) {
       if (iter % 200 === 0 && iter > 0) await yieldToUI();
       const temp = T0 * (1 - iter / saIter);
 
-      restoreLightSnapshot(ctx, currentSnap);
+      if (!stateClean) {
+        traceStart('ls:F-restore');
+        restoreLightSnapshot(ctx, currentSnap);
+        traceEnd('ls:F-restore');
+      }
+      stateClean = false;
 
       const curRange = ctx.placements.length - ctx.lockedCount;
       if (curRange <= 1) break;
@@ -1672,6 +1725,7 @@ async function localSearchPhase(ctx) {
       let moved = false;
 
       if (moveType < 0.45) {
+        traceStart('ls:F-moveA');
         // MOVE A: Remove 1-2 items, reinsert with possibly different sizes
         const numRem = rng() < 0.5 ? 1 : Math.min(2, curRange);
         const remIndices = [];
@@ -1737,8 +1791,8 @@ async function localSearchPhase(ctx) {
             for (const ii of itemCandidates) {
               for (const rot of rots) {
                 for (const { r, c } of ctx.roomTiles) {
-                  if (ctx.occupancy[r][c] >= 0) continue;
-                  if (!canPlace(ctx, rem.groupIdx, ii, rot, r, c, undefined)) continue;
+                  if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+                  if (!canPlaceFast(ctx,rem.groupIdx, ii, rot, r, c, undefined)) continue;
                   const s = scorePlacementPosition(ctx, rem.groupIdx, ii, rot, r, c);
                   if (s > bestScore3) { bestScore3 = s; bestPos3 = { rot, row: r, col: c }; bestII3 = ii; }
                 }
@@ -1760,8 +1814,8 @@ async function localSearchPhase(ctx) {
             let bestPos = null, bestScore = -Infinity;
             for (const rot of rots2) {
               for (const { r, c } of ctx.roomTiles) {
-                if (ctx.occupancy[r][c] >= 0) continue;
-                if (!canPlace(ctx, gi2, ii, rot, r, c, undefined)) continue;
+                if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+                if (!canPlaceFast(ctx,gi2, ii, rot, r, c, undefined)) continue;
                 const s = scorePlacementPosition(ctx, gi2, ii, rot, r, c);
                 if (s > bestScore) { bestScore = s; bestPos = { rot, row: r, col: c }; }
               }
@@ -1771,8 +1825,10 @@ async function localSearchPhase(ctx) {
         }
         if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
         moved = true;
+        traceEnd('ls:F-moveA');
 
       } else if (moveType < 0.75) {
+        traceStart('ls:F-moveB');
         // MOVE B: Shift a random item ±1-2 tiles
         const pi = ctx.lockedCount + Math.floor(rng() * curRange);
         const p = ctx.placements[pi];
@@ -1796,8 +1852,10 @@ async function localSearchPhase(ctx) {
           if (fits) { setOccupancy(ctx, pi); moved = true; }
           else { p.row = origR; p.col = origC; setOccupancy(ctx, pi); }
         }
+        traceEnd('ls:F-moveB');
 
       } else {
+        traceStart('ls:F-moveC');
         // MOVE C: Resize — swap a random item for a different size variant
         const pi = ctx.lockedCount + Math.floor(rng() * curRange);
         const p = ctx.placements[pi];
@@ -1830,26 +1888,32 @@ async function localSearchPhase(ctx) {
             if (!found) { p.itemIdx = origII; setOccupancy(ctx, pi); }
           }
         }
+        traceEnd('ls:F-moveC');
       }
 
-      if (!moved) continue;
+      if (!moved) { stateClean = true; continue; }
 
       // Evaluate
+      traceStart('ls:F-eval');
       const walkOk = checkWalkability(ctx) && hasAnyDoorCandidate(ctx);
       const newScore = walkOk ? scoreLayout(ctx) : -Infinity;
       const delta = newScore - currentScore;
 
       if (delta > 0 || (temp > 0 && Math.exp(delta / temp) > rng())) {
         currentScore = newScore;
-        currentSnap = takeLightSnapshot(ctx);
+        const snap = takeLightSnapshot(ctx);
+        currentSnap = snap;
+        stateClean = true;
         if (newScore > bestKnown) {
           bestKnown = newScore;
-          bestSnap = takeLightSnapshot(ctx);
+          bestSnap = snap;
         }
       }
+      traceEnd('ls:F-eval');
     }
     restoreLightSnapshot(ctx, bestSnap);
   }
+  traceEnd('ls:F-SA');
 
   // Sub-pass G: Final efficiency/relative rebalance
   if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
@@ -2172,8 +2236,8 @@ async function gapFillPhase(ctx) {
         let bestPos = null, bestScore = -Infinity;
         for (const rot of rots) {
           for (const { r, c } of ctx.roomTiles) {
-            if (ctx.occupancy[r][c] >= 0) continue;
-            if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+            if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
             const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
             if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
           }
@@ -2237,6 +2301,7 @@ async function constructivePass(ctx, options) {
 
   let placementCount = 0;
 
+  traceStart('cons:hero');
   // Pass 1: Hero items — place best item at best position iteratively
   for (const gInfo of sortedGroups) {
     const gi = gInfo.groupIdx;
@@ -2285,7 +2350,8 @@ async function constructivePass(ctx, options) {
           const rawMult = preferLarger ? (fs.groups[gi].items[ii]?.multiplierStats ?? fs.groups[gi].items[ii]?.multiplier ?? 1) : 1;
           for (const rot of rots) {
             for (const { r, c } of ctx.roomTiles) {
-              if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+              if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+              if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
               const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c) * rawMult;
               if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; bestII = ii; }
             }
@@ -2314,7 +2380,8 @@ async function constructivePass(ctx, options) {
           let bestPos = null, bestScore = -Infinity;
           for (const rot of rots) {
             for (const { r, c } of ctx.roomTiles) {
-              if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+              if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+              if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
               const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
               if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
             }
@@ -2332,7 +2399,9 @@ async function constructivePass(ctx, options) {
 
     await yieldToUI();
   }
+  traceEnd('cons:hero');
 
+  traceStart('cons:filler');
   // Pass 2: Filler items
   for (const gInfo of sortedGroups) {
     const gi = gInfo.groupIdx;
@@ -2353,7 +2422,8 @@ async function constructivePass(ctx, options) {
         let bestPos = null, bestScore = -Infinity;
         for (const rot of rots) {
           for (const { r, c } of ctx.roomTiles) {
-            if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+            if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+            if (!canPlaceFast(ctx,gi, ii, rot, r, c, undefined)) continue;
             const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
             if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
           }
@@ -2369,13 +2439,18 @@ async function constructivePass(ctx, options) {
 
     await yieldToUI();
   }
+  traceEnd('cons:filler');
 
   // Final stat passes — always run, catches up on deferred items
+  traceStart('cons:efficiency');
   if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+  traceEnd('cons:efficiency');
+  traceStart('cons:relative');
   if (ctx.relativeIndices.length > 0) {
     if (deferRelative || deferSecondary) placeRelativeItemsSmallFirst(ctx);
     else placeRelativeItems(ctx);
   }
+  traceEnd('cons:relative');
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2412,8 +2487,13 @@ export async function runOptimizer(input) {
   const ctx = createContext(input);
   if (!ctx) return input;
 
+  _traceEnabled = !!input.trace;
+  _traces.length = 0;
+
   // Phase 0: Analysis & precomputation
+  traceStart('analyzePhase');
   analyzePhase(ctx);
+  traceEnd('analyzePhase');
   preCleanRoom(ctx);
   await placeRegularPillars(ctx);
 
@@ -2427,12 +2507,14 @@ export async function runOptimizer(input) {
   const initialSnapshot = takeLightSnapshot(ctx);
 
   // Strategy A: Strip-based filling
+  traceStart('strategy:strip');
   restoreLightSnapshot(ctx, initialSnapshot);
   const stripResult = await runStrategy(ctx, (c) => stripFillPhase(c));
   if (stripResult.score > bestScore) {
     bestScore = stripResult.score;
     bestSnapshot = stripResult.snapshot;
   }
+  traceEnd('strategy:strip');
 
   // Strategy B–N: Multiple constructive restarts with variation
   const roomArea = ctx.roomTiles.length;
@@ -2485,14 +2567,18 @@ export async function runOptimizer(input) {
     );
   }
 
+  traceStart('strategies:constructive');
   for (const config of constructiveConfigs) {
+    traceStart('strategy:constructive');
     restoreLightSnapshot(ctx, initialSnapshot);
     const result = await runStrategy(ctx, (c) => constructivePass(c, config));
     if (result.score > bestScore) {
       bestScore = result.score;
       bestSnapshot = result.snapshot;
     }
+    traceEnd('strategy:constructive');
   }
+  traceEnd('strategies:constructive');
 
   // Track best non-deferred result for fallback comparison
   let bestCoreSnapshot = bestSnapshot;
@@ -2512,22 +2598,32 @@ export async function runOptimizer(input) {
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true, deferSecondary: true },
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true, preferLarger: true, deferSecondary: true },
     ];
+    traceStart('strategies:deferred');
     for (const config of deferredConfigs) {
+      traceStart('strategy:deferred');
       restoreLightSnapshot(ctx, initialSnapshot);
       const result = await runStrategy(ctx, (c) => constructivePass(c, config));
       if (result.score > bestScore) {
         bestScore = result.score;
         bestSnapshot = result.snapshot;
       }
+      traceEnd('strategy:deferred');
     }
+    traceEnd('strategies:deferred');
   }
 
   // Polish a snapshot with SA
   async function polishAndScore(snapshot) {
     restoreSnapshot(ctx, snapshot);
+    traceStart('polish:localSearch');
     await localSearchPhase(ctx);
+    traceEnd('polish:localSearch');
+    traceStart('polish:trim');
     await trimPhase(ctx);
+    traceEnd('polish:trim');
+    traceStart('polish:door');
     doorPhase(ctx);
+    traceEnd('polish:door');
     if (!validateFinal(ctx)) {
       restoreSnapshot(ctx, snapshot);
       doorPhase(ctx);
@@ -2558,7 +2654,8 @@ export async function runOptimizer(input) {
   }
   restoreSnapshot(ctx, bestFinalSnapshot);
 
-  return { room: ctx.room, placements: ctx.placements, doors: ctx.doors };
+  const trace = traceSummary();
+  return { room: ctx.room, placements: ctx.placements, doors: ctx.doors, trace };
 }
 
 // ── Context creation ─────────────────────────────────────

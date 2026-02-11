@@ -48,10 +48,11 @@ function decodeSaveString(input) {
 
 const args = process.argv.slice(2);
 const decode = args.includes("--decode");
+const trace = args.includes("--trace");
 const input = args.find(a => !a.startsWith("--"));
 
 if (!input) {
-  console.error("Usage: node scripts/run-optimizer.js <save-string-or-URL> [--decode]");
+  console.error("Usage: node scripts/run-optimizer.js <save-string-or-URL> [--decode] [--trace]");
   process.exit(1);
 }
 
@@ -83,6 +84,7 @@ const optimizerInput = {
     groupIdx: p[0], itemIdx: p[1], rotation: p[2], row: p[3], col: p[4],
   })),
   doors: new Set(plan.doors.map(d => `${d[0]},${d[1]}`)),
+  trace,
 };
 
 const t0 = performance.now();
@@ -109,6 +111,20 @@ const saveString = toBase64url(versioned);
 console.log(saveString);
 
 console.error(`Result: ${result.placements.length} placements, ${result.room.flat().filter(Boolean).length} room tiles (${elapsed}s)`);
+
+// Print trace summary
+if (result.trace) {
+  console.error();
+  console.error("─── Trace Summary ───────────────────────────────────────");
+  console.error(`${"Phase".padEnd(28)} ${"Calls".padStart(6)} ${"Total(ms)".padStart(10)} ${"Avg(ms)".padStart(10)} ${"Max(ms)".padStart(10)}`);
+  console.error("─".repeat(68));
+  for (const r of result.trace) {
+    console.error(
+      `${r.name.padEnd(28)} ${String(r.calls).padStart(6)} ${r.totalMs.toFixed(1).padStart(10)} ${r.avgMs.toFixed(1).padStart(10)} ${r.maxMs.toFixed(1).padStart(10)}`
+    );
+  }
+  console.error("─".repeat(68));
+}
 
 // Optionally decode the result
 if (decode) {
