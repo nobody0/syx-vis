@@ -184,6 +184,10 @@ body::after {
   z-index: 0;
 }
 
+#main-content {
+  height: 100%;
+}
+
 /* ── Graph container ────────────────────────────────── */
 
 #graph-container {
