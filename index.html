@@ -76,8 +76,10 @@
       const { render } = await import("./display/render.js");
       const { initTabs, switchTab, restorePlan } = await import("./display/tabs.js");
       const { initRouter } = await import("./display/router.js");
-      render();
+      const { initHelp } = await import("./display/help.js");
+      await render();
       initTabs();
+      initHelp();
       initRouter(switchTab, restorePlan);
     } catch (err) {
       document.body.style.display = "flex";

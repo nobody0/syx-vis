@@ -1583,7 +1583,9 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   border-radius: var(--panel-radius);
   box-shadow: 0 12px 48px rgba(0,0,0,0.7);
   padding: 24px 32px;
-  max-width: 420px;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
   width: 90%;
 }
 
@@ -1628,6 +1630,23 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
 
 .help-getting-started {
   margin-bottom: 6px;
+}
+
+.help-description {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.help-description strong {
+  color: var(--text-primary);
+}
+.help-description code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-medium);
+  border-radius: 3px;
+  padding: 1px 5px;
 }
 
 .shortcut-table {

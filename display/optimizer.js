@@ -66,6 +66,21 @@ function restoreSnapshot(ctx, snapshot) {
   ctx._doorCandidateCache = undefined;
 }
 
+// Light snapshots: save only placements (grids are rebuilt on restore).
+// Skips room, doors, reservedTiles, roomTiles, roomTileSet — these are STATIC during SA/strategy loops.
+function takeLightSnapshot(ctx) {
+  return {
+    placements: ctx.placements.map(p => ({ ...p })),
+  };
+}
+
+function restoreLightSnapshot(ctx, snap) {
+  ctx.placements = snap.placements.map(p => ({ ...p }));
+  ctx.occupancy = buildOccupancyGrid(ctx);
+  rebuildGroupCounts(ctx);
+  ctx._doorCandidateCache = undefined;
+}
+
 function rebuildRoomTiles(ctx) {
   ctx.roomTiles = [];
   ctx.roomTileSet = new Set();
@@ -176,7 +191,10 @@ function _hasAnyDoorCandidateImpl(ctx) {
 }
 
 // ── Async yield ──────────────────────────────────────────
-function yieldToUI() { return new Promise(resolve => setTimeout(resolve, 0)); }
+function yieldToUI() {
+  if (typeof window === 'undefined') return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
 
 // ── Primary stat detection ───────────────────────────────
 function findPrimaryStatIndex(fs, _building) {
@@ -609,6 +627,10 @@ function analyzePhase(ctx) {
       fillerItems: fillerItems.map(f => f.ii),
     });
   }
+
+  // Build groupIdx → gInfo lookup map for O(1) access
+  ctx.groupInfoMap = new Map();
+  for (const gi of ctx.groupInfo) ctx.groupInfoMap.set(gi.groupIdx, gi);
 }
 
 // ══════════════════════════════════════════════════════════
@@ -914,30 +936,30 @@ async function stripFillPhase(ctx) {
   // Try the best strip candidates in both orientations, keep the best result
   let bestSnapshot = null;
   let bestPrimaryVal = -Infinity;
-  const initialSnap = takeSnapshot(ctx);
+  const initialSnap = takeLightSnapshot(ctx);
 
   // Try top N strip candidates in both orientations
   const topCandidates = candidates.slice(0, Math.min(8, candidates.length));
 
   for (const strip of topCandidates) {
     // Try horizontal fill
-    restoreSnapshot(ctx, initialSnap);
+    restoreLightSnapshot(ctx, initialSnap);
     fillWithStrips(ctx, strip, true, rect);
     let stats = getStats(ctx);
     let primaryVal = stats[ctx.primaryStatIdx] ?? 0;
     if (primaryVal > bestPrimaryVal) {
       bestPrimaryVal = primaryVal;
-      bestSnapshot = takeSnapshot(ctx);
+      bestSnapshot = takeLightSnapshot(ctx);
     }
 
     // Try vertical fill with same strip
-    restoreSnapshot(ctx, initialSnap);
+    restoreLightSnapshot(ctx, initialSnap);
     fillWithStrips(ctx, strip, false, rect);
     stats = getStats(ctx);
     primaryVal = stats[ctx.primaryStatIdx] ?? 0;
     if (primaryVal > bestPrimaryVal) {
       bestPrimaryVal = primaryVal;
-      bestSnapshot = takeSnapshot(ctx);
+      bestSnapshot = takeLightSnapshot(ctx);
     }
 
     // Try rotated strip in both orientations
@@ -953,13 +975,13 @@ async function stripFillPhase(ctx) {
       };
 
       for (const horiz of [true, false]) {
-        restoreSnapshot(ctx, initialSnap);
+        restoreLightSnapshot(ctx, initialSnap);
         fillWithStrips(ctx, altStrip, horiz, rect);
         stats = getStats(ctx);
         primaryVal = stats[ctx.primaryStatIdx] ?? 0;
         if (primaryVal > bestPrimaryVal) {
           bestPrimaryVal = primaryVal;
-          bestSnapshot = takeSnapshot(ctx);
+          bestSnapshot = takeLightSnapshot(ctx);
         }
       }
     }
@@ -969,7 +991,7 @@ async function stripFillPhase(ctx) {
 
   // Restore best strip fill result
   if (bestSnapshot) {
-    restoreSnapshot(ctx, bestSnapshot);
+    restoreLightSnapshot(ctx, bestSnapshot);
   }
 }
 
@@ -1294,7 +1316,7 @@ async function localSearchPhase(ctx) {
     const a2Stats = getStats(ctx);
     const a2Primary = a2Stats[ctx.primaryStatIdx] ?? 0;
     const a2Score = scoreLayout(ctx);
-    const a2Snap = takeSnapshot(ctx);
+    const a2Snap = takeLightSnapshot(ctx);
 
     // Remove all relative-only placements
     for (let pi = ctx.placements.length - 1; pi >= ctx.lockedCount; pi--) {
@@ -1305,7 +1327,7 @@ async function localSearchPhase(ctx) {
       }
     }
     rebuildGroupCounts(ctx);
-    const noRelSnap = takeSnapshot(ctx);
+    const noRelSnap = takeLightSnapshot(ctx);
     const noRelCount = ctx.placements.length;
 
     // Try each single upgrade independently, pick the one with best final score
@@ -1313,7 +1335,7 @@ async function localSearchPhase(ctx) {
     let bestA2Snap = a2Snap;
 
     for (let pi = ctx.lockedCount; pi < noRelCount; pi++) {
-      restoreSnapshot(ctx, noRelSnap);
+      restoreLightSnapshot(ctx, noRelSnap);
       const p = ctx.placements[pi];
       const group = fs.groups[p.groupIdx];
       if (group.items.length <= 1) continue;
@@ -1321,7 +1343,7 @@ async function localSearchPhase(ctx) {
 
       for (let newII = p.itemIdx + 1; newII < group.items.length; newII++) {
         for (const [sr, sc] of SHIFT_OFFSETS) {
-          restoreSnapshot(ctx, noRelSnap);
+          restoreLightSnapshot(ctx, noRelSnap);
           const pp = ctx.placements[pi];
           clearOccupancy(ctx, pi);
           pp.itemIdx = newII;
@@ -1342,10 +1364,10 @@ async function localSearchPhase(ctx) {
           if (fits) {
             setOccupancy(ctx, pi);
             if (checkWalkability(ctx) && hasAnyDoorCandidate(ctx)) {
-              const upSnap = takeSnapshot(ctx);
+              const upSnap = takeLightSnapshot(ctx);
               // Try both large-first and small-first relative placement
               for (const placeFn of [placeRelativeItems, placeRelativeItemsSmallFirst]) {
-                restoreSnapshot(ctx, upSnap);
+                restoreLightSnapshot(ctx, upSnap);
                 if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
                 placeFn(ctx);
                 const sc2 = scoreLayout(ctx);
@@ -1353,7 +1375,7 @@ async function localSearchPhase(ctx) {
                 const prim2 = st2[ctx.primaryStatIdx] ?? 0;
                 if (sc2 > bestA2Score && prim2 >= a2Primary) {
                   bestA2Score = sc2;
-                  bestA2Snap = takeSnapshot(ctx);
+                  bestA2Snap = takeLightSnapshot(ctx);
                 }
               }
             }
@@ -1362,7 +1384,7 @@ async function localSearchPhase(ctx) {
       }
     }
 
-    restoreSnapshot(ctx, bestA2Snap);
+    restoreLightSnapshot(ctx, bestA2Snap);
   }
 
   await yieldToUI();
@@ -1528,7 +1550,7 @@ async function localSearchPhase(ctx) {
   for (let round = 0; round < 3; round++) {
     let anyImproved = false;
     const preScore = scoreLayout(ctx);
-    const snap = takeSnapshot(ctx);
+    const snap = takeLightSnapshot(ctx);
 
     // Collect primary-stat items sorted by contribution (smallest first = best to remove)
     const primaryItems = [];
@@ -1620,7 +1642,7 @@ async function localSearchPhase(ctx) {
         break; // restart from new state
       }
       // Revert
-      restoreSnapshot(ctx, snap);
+      restoreLightSnapshot(ctx, snap);
     }
     if (!anyImproved) break;
     await yieldToUI();
@@ -1631,8 +1653,8 @@ async function localSearchPhase(ctx) {
     const rng = ctx.rng;
     let currentScore = scoreLayout(ctx);
     let bestKnown = currentScore;
-    let bestSnap = takeSnapshot(ctx);
-    let currentSnap = takeSnapshot(ctx);
+    let bestSnap = takeLightSnapshot(ctx);
+    let currentSnap = takeLightSnapshot(ctx);
 
     const saIter = ctx.roomTiles.length > 500 ? 800 : 2000;
     const T0 = 3000;
@@ -1640,7 +1662,7 @@ async function localSearchPhase(ctx) {
       if (iter % 200 === 0 && iter > 0) await yieldToUI();
       const temp = T0 * (1 - iter / saIter);
 
-      restoreSnapshot(ctx, currentSnap);
+      restoreLightSnapshot(ctx, currentSnap);
 
       const curRange = ctx.placements.length - ctx.lockedCount;
       if (curRange <= 1) break;
@@ -1690,7 +1712,7 @@ async function localSearchPhase(ctx) {
 
         // Reinsert — try different item sizes
         for (const rem of removedInfo) {
-          const gInfo = ctx.groupInfo.find(g => g.groupIdx === rem.groupIdx);
+          const gInfo = ctx.groupInfoMap.get(rem.groupIdx);
           if (!gInfo) continue;
           const group = fs.groups[rem.groupIdx];
           const rots = getAllowedRotations(group);
@@ -1819,14 +1841,14 @@ async function localSearchPhase(ctx) {
 
       if (delta > 0 || (temp > 0 && Math.exp(delta / temp) > rng())) {
         currentScore = newScore;
-        currentSnap = takeSnapshot(ctx);
+        currentSnap = takeLightSnapshot(ctx);
         if (newScore > bestKnown) {
           bestKnown = newScore;
-          bestSnap = takeSnapshot(ctx);
+          bestSnap = takeLightSnapshot(ctx);
         }
       }
     }
-    restoreSnapshot(ctx, bestSnap);
+    restoreLightSnapshot(ctx, bestSnap);
   }
 
   // Sub-pass G: Final efficiency/relative rebalance
@@ -2402,10 +2424,10 @@ export async function runOptimizer(input) {
   let bestScore = -Infinity;
   let bestSnapshot = null;
 
-  const initialSnapshot = takeSnapshot(ctx);
+  const initialSnapshot = takeLightSnapshot(ctx);
 
   // Strategy A: Strip-based filling
-  restoreSnapshot(ctx, initialSnapshot);
+  restoreLightSnapshot(ctx, initialSnapshot);
   const stripResult = await runStrategy(ctx, (c) => stripFillPhase(c));
   if (stripResult.score > bestScore) {
     bestScore = stripResult.score;
@@ -2464,7 +2486,7 @@ export async function runOptimizer(input) {
   }
 
   for (const config of constructiveConfigs) {
-    restoreSnapshot(ctx, initialSnapshot);
+    restoreLightSnapshot(ctx, initialSnapshot);
     const result = await runStrategy(ctx, (c) => constructivePass(c, config));
     if (result.score > bestScore) {
       bestScore = result.score;
@@ -2491,7 +2513,7 @@ export async function runOptimizer(input) {
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true, preferLarger: true, deferSecondary: true },
     ];
     for (const config of deferredConfigs) {
-      restoreSnapshot(ctx, initialSnapshot);
+      restoreLightSnapshot(ctx, initialSnapshot);
       const result = await runStrategy(ctx, (c) => constructivePass(c, config));
       if (result.score > bestScore) {
         bestScore = result.score;

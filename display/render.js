@@ -1072,6 +1072,14 @@ async function initRenderer() {
   app.canvas.style.position = "relative";
   app.canvas.style.zIndex = "1";
 
+  // Re-trigger PixiJS resize when graph tab becomes visible again
+  // (resizeTo reports 0×0 while the container is display:none)
+  new ResizeObserver(() => {
+    if (container.offsetWidth > 0 && container.offsetHeight > 0) {
+      app.resize();
+    }
+  }).observe(container);
+
   // World container (zoom/pan applied here)
   worldContainer = new Container();
   app.stage.addChild(worldContainer);
@@ -1209,61 +1217,6 @@ async function initRenderer() {
       }
     }
   });
-
-  // Shortcut help overlay
-  const shortcutOverlay = document.createElement("div");
-  shortcutOverlay.className = "shortcut-overlay";
-  shortcutOverlay.innerHTML = `
-    <div class="shortcut-modal">
-      <div class="shortcut-modal-header">
-        <span>How to Use</span>
-        <button class="shortcut-close">\u00D7</button>
-      </div>
-      <div class="help-getting-started">
-        <div class="help-section-label">Getting Started</div>
-        <table class="shortcut-table">
-          <tr>
-            <td style="width:1%;padding-right:12px"><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#5a9eff;box-shadow:0 0 3px rgba(0,0,0,0.4);vertical-align:middle"></span></td>
-            <td><strong style="color:var(--text-primary)">Circle = Resource</strong></td>
-          </tr>
-          <tr>
-            <td><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background:#d88848;box-shadow:0 0 3px rgba(0,0,0,0.4);vertical-align:middle"></span></td>
-            <td><strong style="color:var(--text-primary)">Rectangle = Building</strong></td>
-          </tr>
-          <tr><td></td><td>Click a node to see its details and supply chain</td></tr>
-          <tr><td></td><td>Hover an edge to see recipe rates</td></tr>
-          <tr><td></td><td>Use the filter panel to search or hide categories</td></tr>
-        </table>
-      </div>
-      <div class="help-section-label" style="margin-top:16px">Keyboard Shortcuts</div>
-      <table class="shortcut-table">
-        <tr><td class="shortcut-key"><kbd>Ctrl+F</kbd></td><td>Search nodes</td></tr>
-        <tr><td class="shortcut-key"><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>Edge mode (Production / Construction / Upgrade / All)</td></tr>
-        <tr><td class="shortcut-key"><kbd>F</kbd></td><td>Focus on selected node</td></tr>
-        <tr><td class="shortcut-key"><kbd>Esc</kbd></td><td>Exit focus / deselect</td></tr>
-        <tr><td class="shortcut-key"><kbd>Alt+1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>Switch tabs</td></tr>
-        <tr><td class="shortcut-key"><kbd>?</kbd></td><td>This help</td></tr>
-      </table>
-    </div>
-  `;
-  document.body.appendChild(shortcutOverlay);
-
-  function toggleShortcutHelp() {
-    shortcutOverlay.classList.toggle("visible");
-  }
-  shortcutOverlay.addEventListener("click", (e) => {
-    if (e.target === shortcutOverlay) toggleShortcutHelp();
-  });
-  shortcutOverlay.querySelector(".shortcut-close").addEventListener("click", toggleShortcutHelp);
-
-  document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === "?") { e.preventDefault(); toggleShortcutHelp(); }
-  });
-
-  const helpBtn = document.getElementById("help-btn");
-  if (helpBtn) helpBtn.addEventListener("click", toggleShortcutHelp);
 
   // ── Animated dash ticker ──
   app.ticker.add((ticker) => {

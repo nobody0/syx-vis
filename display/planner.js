@@ -2643,11 +2643,16 @@ function buildSelector(container) {
     if (state.placements.length === 0) return;
     pushUndo();
     state.placements = [];
+    if (state.ctx) {
+      state.ctx.placements = state.placements;
+      buildOccupancyGrid(state.ctx);
+    }
     computeStats();
     refreshGrid();
     refreshPalette();
     refreshStats();
     refreshValidation();
+    syncUrl();
   });
   g4.appendChild(clearFurnBtn);
 
