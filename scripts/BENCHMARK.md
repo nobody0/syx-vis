@@ -42,10 +42,9 @@ Non-rectangular room. Primary stat: services (latrines).
 Known optimum from discord: 56. Starter: `http://localhost:8080/#planner/AuPPSSxLLMkvqozPyy_KTczh52dg-P_z_-f_z_-f_z__v_2_-j9wbgMDEAAA`
 - Best: **56 latrines** - `http://localhost:8080/#planner/AQ9sYXZhdG9yeV9ub3JtYWwPDwAA__n_8__n_8__n18_fn_8__n_8__n_8__gAAABwAIAQgGAAkBBwIACAEHCgAIAQEKAAUAAgYBBwACAQEFAAUCCAABDgkEAA4FBg4ACQoAAA0`
 - Runtime: **2.3s**
-- KNOWN BEST, 56 Latrines ((this was build by hand and serves a reference!)) - `http://localhost:8080/#planner/AuPPSSxLLMkvqozPyy_KTczh52dg-P_z_-f_z_-f_z__v_2_mho4t4GBgZeBk5GRjZGRiQtMMIEILiDBAWJxcDGwMnMzgQguBg5mRiYQARYDKmZg5wIRTAwA`
 
-### 6. Smithey - 40x40
-Stress test. Known issues: 95% efficiency, 457 unsupported tiles.
+### 6. Smithy - 40x40
+Stress test. Regular pillar grid (spacing 5) for structural stability, tiling constructive strategy.
 - Starter: `http://localhost:8080/#planner/AuMvzy_KLs7IL4gvzs0syajU0GAAgfr_____G7IEAwQAAA`
-- Best: **334 employees** - `http://localhost:8080/#planner/AQ93b3Jrc2hvcF9zbWl0aHkoKAAAAAAAf_____5______n_____-f_____5______n_____-fve9735______n_____-f_____5______n3ve99-f_____5______n____9-f_____5-973v_n_____-f_____5_____fn_____-ff____5______n_____-f_____5______n_____-f_____5______n_____-f_____5______n_____-f_____5______n_____-f_____5______gAAAAAAXwEDARcCAQMBFwUBAwEXCAEDARcLAQMBFw4BAwEXEQEDARcUAQMBFxcBAwEXGgEDARcdAQMBFyABAwEXIwEDAR0lAQMBHwIBAwEfBQEDAR8IAQMBHwsBAwEfDgEDAR8RAQMBHxQBAwEfFwEDAR8aAQMBHx0BAwEfIAAAACYBAgAAAQECAAEBJgIAAiYmAgADJQECAQAmBQIBARkBAgECJgcCAQMkJgICACYJAgIBAgECAgImDAICAwImAgMAJg8CAwEFAQIDAiYTAgMDBSYCBAAmFwIEAQkBAgQCJhwCBAMJJgIFAAEDAgUBDgEBAgABCQEDAAEPAQUAARcBBAIVGgEHAhULAQYAEg8BAQEOJQEJARAdAQsCBAgBAAEaJQEIAg8NAQoCBQ0BDAEIFAECAwsRAQMDHyIBBQANGQEEABIFAQcCBBEBBgECBAEBARIlAQkCDggBCwADIQEAAgEiAQgDECIBAgAVBQEBAhAXAQABDxQCAAABFgIAAQYMAgACBhECAAMIDAIBACYhAgEBFAECAQIREgIBAxYmAgIADAgCAgEJBgICAgwNAgIDDQYCAwANDQIDAQIGAgMCDCECAwMDAgIEAQgCAgQDDgICBQEQAwIGAAwWAgYBBxMXJwMAJR4AJyQWABgnAAIjABgAGwAnBCAAACQZJyQAFwAcAB0AHwAhACcjJyUiAA`
-- Runtime: **43.2s**
+- Best: **324 employees, 100% efficiency, 0 unsupported tiles** (was 334/95%/457 unsupported)
+- Runtime: **~147s**

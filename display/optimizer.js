@@ -306,6 +306,44 @@ function preCleanRoom(ctx) {
 // ── Pre-place support pillars ────────────────────────────
 async function placeRegularPillars(ctx) {
   if (!ctx.furnitureSet.mustBeIndoors) return;
+
+  const roomArea = ctx.roomTiles.length;
+  const unstableInitial = countUnstableTiles(ctx);
+
+  // For large rooms with many unstable tiles, place pillars on a regular grid
+  if (roomArea > 200 && unstableInitial > roomArea * 0.5) {
+    // Find room bounding box
+    let minR = ctx.gridH, maxR = 0, minC = ctx.gridW, maxC = 0;
+    for (const { r, c } of ctx.roomTiles) {
+      if (r < minR) minR = r;
+      if (r > maxR) maxR = r;
+      if (c < minC) minC = c;
+      if (c > maxC) maxC = c;
+    }
+
+    // Try spacing 5 first (minimum for full stability), fall back to 4
+    for (const spacing of [5, 4]) {
+      // Place pillars on grid within the room
+      const pillarPositions = [];
+      for (let r = minR + spacing; r < maxR; r += spacing)
+        for (let c = minC + spacing; c < maxC; c += spacing)
+          if (ctx.room[r][c]) pillarPositions.push({ r, c });
+
+      // Apply all pillars
+      for (const { r, c } of pillarPositions) removeRoomTile(ctx, r, c);
+
+      if (countUnstableTiles(ctx) === 0 && checkRoomConnectivity(ctx)) {
+        ctx.pillarSpacing = spacing;
+        break; // grid worked
+      }
+
+      // Revert if grid failed (shouldn't happen for rectangular rooms)
+      for (const { r, c } of pillarPositions) restoreRoomTile(ctx, r, c);
+    }
+    await yieldToUI();
+  }
+
+  // Greedy cleanup: fix any remaining unstable tiles the grid missed
   for (let pass = 0; pass < 20; pass++) {
     const unstable = countUnstableTiles(ctx);
     if (unstable === 0) break;
@@ -1915,7 +1953,7 @@ async function localSearchPhase(ctx) {
     let bestSnap = takeLightSnapshot(ctx);
     let currentSnap = takeLightSnapshot(ctx);
 
-    const saIter = ctx.roomTiles.length > 500 ? 800 : 2000;
+    const saIter = ctx.roomTiles.length > 500 ? 1200 : 2000;
     const T0 = 3000;
     let stateClean = true;
     for (let iter = 0; iter < saIter; iter++) {
@@ -2935,6 +2973,144 @@ async function rotationalConstructivePass(ctx, config) {
 }
 
 // ══════════════════════════════════════════════════════════
+// Tiling Constructive Strategy
+// ══════════════════════════════════════════════════════════
+
+/**
+ * Tiling constructive strategy: optimize one section, then copy it across the room.
+ * For large rooms where "things naturally repeat" — build one section including pillars and tile it.
+ * @param {object} ctx
+ * @param {object} config - constructive pass config
+ */
+async function tilingConstructivePass(ctx, config) {
+  const { gridW, gridH, room } = ctx;
+  const pillarSpacing = ctx.pillarSpacing || 5;
+  const sectionDim = 2 * pillarSpacing; // default 10
+
+  // Find room bounding box
+  let minR = gridH, maxR = 0, minC = gridW, maxC = 0;
+  for (const { r, c } of ctx.roomTiles) {
+    if (r < minR) minR = r;
+    if (r > maxR) maxR = r;
+    if (c < minC) minC = c;
+    if (c > maxC) maxC = c;
+  }
+  const roomW = maxC - minC + 1, roomH = maxR - minR + 1;
+
+  // Adaptive section sizing
+  let secW = sectionDim, secH = sectionDim;
+  if (roomW < 4 * secW) secW = pillarSpacing;
+  if (roomH < 4 * secH) secH = pillarSpacing;
+  // Must produce >= 2 full sections per axis
+  if (roomW < 2 * secW || roomH < 2 * secH) {
+    // Room too small for tiling, fall back to regular constructive
+    await constructivePass(ctx, config);
+    return;
+  }
+
+  // Compute section grid
+  const numSecCols = Math.floor(roomW / secW);
+  const numSecRows = Math.floor(roomH / secH);
+
+  // Identify "full" sections (all tiles present in the room)
+  const sections = [];
+  let repIdx = -1;
+  for (let sr = 0; sr < numSecRows; sr++) {
+    for (let sc = 0; sc < numSecCols; sc++) {
+      const originR = minR + sr * secH;
+      const originC = minC + sc * secW;
+      let full = true;
+      for (let r = originR; r < originR + secH && full; r++)
+        for (let c = originC; c < originC + secW && full; c++)
+          if (r >= gridH || c >= gridW || !room[r][c]) full = false;
+      sections.push({ sr, sc, originR, originC, full });
+      // Pick first interior full section as representative (avoids edge effects)
+      if (full && repIdx < 0 && sr > 0 && sc > 0 && sr < numSecRows - 1 && sc < numSecCols - 1) repIdx = sections.length - 1;
+    }
+  }
+  // Fall back to first full section if no interior one found
+  if (repIdx < 0) repIdx = sections.findIndex(s => s.full);
+  if (repIdx < 0) {
+    // No full section — fall back to regular constructive
+    await constructivePass(ctx, config);
+    return;
+  }
+
+  const rep = sections[repIdx];
+
+  // Save original roomTiles and freeBitmap
+  const origRoomTiles = ctx.roomTiles;
+  const origRoomTileSet = ctx.roomTileSet;
+
+  // Restrict roomTiles to the representative section (keep room[][] intact for walkability)
+  const sectionTiles = [];
+  const sectionTileSet = new Set();
+  for (const t of origRoomTiles) {
+    if (t.r >= rep.originR && t.r < rep.originR + secH &&
+        t.c >= rep.originC && t.c < rep.originC + secW) {
+      sectionTiles.push(t);
+      sectionTileSet.add(t.r * gridW + t.c);
+    }
+  }
+
+  // Restrict freeBitmap to section
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (!sectionTileSet.has(r * gridW + c)) ctx.freeBitmap[r * gridW + c] = 0;
+
+  ctx.roomTiles = sectionTiles;
+  ctx.roomTileSet = sectionTileSet;
+
+  // Run constructive pass on the restricted section
+  await constructivePass(ctx, config);
+
+  // Capture the placements made in the representative section
+  const sectionPlacements = ctx.placements.slice(ctx.lockedCount);
+
+  // Restore full roomTiles and freeBitmap
+  ctx.roomTiles = origRoomTiles;
+  ctx.roomTileSet = origRoomTileSet;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      ctx.freeBitmap[r * gridW + c] = (room[r][c] && ctx.occupancy[r][c] < 0) ? 1 : 0;
+
+  // Copy section placements to all other full sections
+  for (let si = 0; si < sections.length; si++) {
+    if (si === repIdx || !sections[si].full) continue;
+    const target = sections[si];
+    const dr = target.originR - rep.originR;
+    const dc = target.originC - rep.originC;
+
+    for (const p of sectionPlacements) {
+      const group = ctx.furnitureSet.groups[p.groupIdx];
+      const maxP = group.max ?? 100;
+      if (countGroupPlacements(ctx, p.groupIdx) >= maxP) continue;
+
+      // Try exact offset first, then with small adjustments
+      const newRow = p.row + dr;
+      const newCol = p.col + dc;
+      if (!placeItem(ctx, p.groupIdx, p.itemIdx, p.rotation, newRow, newCol)) {
+        // Try alternate rotations at exact position
+        const rots = getAllowedRotations(group);
+        let placed = false;
+        for (const rot of rots) {
+          if (rot === p.rotation) continue;
+          if (placeItem(ctx, p.groupIdx, p.itemIdx, rot, newRow, newCol)) { placed = true; break; }
+        }
+        if (!placed) {
+          // Try small offsets
+          for (const [odr, odc] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+            if (placeItem(ctx, p.groupIdx, p.itemIdx, p.rotation, newRow + odr, newCol + odc)) break;
+          }
+        }
+      }
+    }
+    await yieldToUI();
+  }
+  // Partial sections (room edges, remainders) are left to gapFillPhase and polish
+}
+
+// ══════════════════════════════════════════════════════════
 // Main entry point
 // ══════════════════════════════════════════════════════════
 
@@ -3044,16 +3220,20 @@ export async function runOptimizer(input) {
       { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: true, mixedSizing: true, preferLarger: true },
     );
   } else {
-    // For large rooms, just a few more configs
+    // For large rooms: more diversity + deferred secondary
     constructiveConfigs.push(
       { skipInterval: 0, heroRotate: 2, reverseScan: false, tryAllHeroSizes: false },
       { skipInterval: 4, heroRotate: 0, reverseScan: true, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 1, reverseScan: true, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: false, deferSecondary: true },
     );
   }
 
   // Mirror constructive configs (only when room shape is sufficiently symmetric)
   const mirrorConfigs = [];
-  if (ctx.symmetryAxes.bestAxisScore >= 0.5 && !isLargeRoom) {
+  if (ctx.symmetryAxes.bestAxisScore >= 0.5) {
     const ba = ctx.symmetryAxes.bestAxis;
     mirrorConfigs.push(
       { constructiveConfig: { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false }, axis: 'vertical' },
@@ -3065,7 +3245,7 @@ export async function runOptimizer(input) {
 
   // Rotational (180°) constructive configs
   const rotationalConfigs = [];
-  if (ctx.symmetryAxes.rotational >= 0.5 && !isLargeRoom) {
+  if (ctx.symmetryAxes.rotational >= 0.5) {
     rotationalConfigs.push(
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false },
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true },
@@ -3074,8 +3254,18 @@ export async function runOptimizer(input) {
 
   // Compute total strategies for progress (1 strip + constructive + mirror + rotational + deferred)
   const hasSecondary = (ctx.empIdx >= 0 && ctx.effIdx >= 0) || ctx.relativeIndices.length > 0;
-  const deferredCount = (hasSecondary && !isLargeRoom) ? 8 : 0;
-  const totalStrategies = 1 + constructiveConfigs.length + mirrorConfigs.length + rotationalConfigs.length + deferredCount;
+  // Tiling strategies (only for large rooms)
+  const tilingConfigs = [];
+  if (isLargeRoom) {
+    tilingConfigs.push(
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true },
+      { skipInterval: 0, heroRotate: 1, reverseScan: false, tryAllHeroSizes: false },
+    );
+  }
+  const deferredCount = hasSecondary ? 8 : 0;
+  const totalStrategies = 1 + constructiveConfigs.length + mirrorConfigs.length + rotationalConfigs.length + tilingConfigs.length + deferredCount;
   let strategiesDone = 1; // strip already done
   // Strategies span 0.02–0.70 of progress
   const STRAT_START = 0.02, STRAT_END = 0.70;
@@ -3134,13 +3324,32 @@ export async function runOptimizer(input) {
     traceEnd('strategies:rotational');
   }
 
+  // Tiling strategies (large rooms only)
+  if (tilingConfigs.length > 0) {
+    traceStart('strategies:tiling');
+    for (const config of tilingConfigs) {
+      const p = STRAT_START + (STRAT_END - STRAT_START) * (strategiesDone / totalStrategies);
+      reportProgress('Searching', `Tiling ${strategiesDone + 1} / ${totalStrategies}`, p);
+      traceStart('strategy:tiling');
+      restoreLightSnapshot(ctx, initialSnapshot);
+      const result = await runStrategy(ctx, (c) => tilingConstructivePass(c, config));
+      if (result.score > bestScore) {
+        bestScore = result.score;
+        bestSnapshot = result.snapshot;
+      }
+      traceEnd('strategy:tiling');
+      strategiesDone++;
+    }
+    traceEnd('strategies:tiling');
+  }
+
   // Track best non-deferred result for fallback comparison
   let bestCoreSnapshot = bestSnapshot;
 
   // Deferred secondary strategies: place primary items without interleaved secondary items
   // (efficiency and/or relative), then place secondary items at end of pass.
   // Gives primary items maximum packing density.
-  if (hasSecondary && !isLargeRoom) {
+  if (hasSecondary) {
     const deferredConfigs = [
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false, deferSecondary: true },
       { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: false, deferSecondary: true },
