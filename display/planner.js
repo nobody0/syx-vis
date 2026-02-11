@@ -1719,8 +1719,9 @@ function refreshStatsContent() {
 
     let formatted;
     let colorClass = "";
-    if (stat.type === "efficiency" && employeesIdx >= 0) {
-      const empVal = state.stats[employeesIdx] ?? 0;
+    if (stat.type === "efficiency") {
+      const refIdx = employeesIdx >= 0 ? employeesIdx : primaryIdx;
+      const empVal = state.stats[refIdx] ?? 0;
       const pct = 0.5 + 0.5 * Math.min(1, val / Math.max(1, empVal));
       const pctRound = Math.round(pct * 100);
       formatted = pctRound + "%";

@@ -769,6 +769,11 @@ function analyzePhase(ctx) {
     }
   }
 
+  // Fallback: if no employees stat but efficiency exists, use primary stat (e.g. university "students")
+  if (ctx.empIdx < 0 && ctx.effIdx >= 0) {
+    ctx.empIdx = ctx.primaryStatIdx;
+  }
+
   rebuildRoomTiles(ctx);
 
   // Pre-compute all rotated tile arrays
