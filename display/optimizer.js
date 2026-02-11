@@ -11,12 +11,15 @@ import {
 // ── Seeded PRNG (mulberry32) ─────────────────────────────
 function createRNG(seed) {
   let s = seed | 0;
-  return function() {
+  const rng = function() {
     s = (s + 0x6D2B79F5) | 0;
     let t = Math.imul(s ^ (s >>> 15), 1 | s);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+  rng.save = () => s;
+  rng.restore = (state) => { s = state; };
+  return rng;
 }
 
 function hashSeed(str) {
@@ -1066,6 +1069,62 @@ function placeRelativeItems(ctx) {
   }
 }
 
+/** Place relative items using smallest items first (minimizes tile usage for relative coverage). */
+function placeRelativeItemsSmallFirst(ctx) {
+  const { furnitureSet: fs } = ctx;
+  if (ctx.relativeIndices.length === 0) return;
+  const stats = getStats(ctx);
+  const primaryVal = stats[ctx.primaryStatIdx] ?? 0;
+  let allMet = true;
+  for (const rel of ctx.relativeIndices)
+    if ((stats[rel.statIdx] ?? 0) < primaryVal) { allMet = false; break; }
+  if (allMet) return;
+
+  for (const gInfo of ctx.groupInfo) {
+    if (!gInfo.hasRelative || gInfo.hasPrimary) continue;
+    const gi = gInfo.groupIdx;
+    const group = fs.groups[gi];
+    const maxP = group.max ?? 100;
+    let placed = countGroupPlacements(ctx, gi);
+    const rots = getAllowedRotations(group);
+
+    // Sort by tile count ascending (smallest items first)
+    const rankedItems = group.items.map((_, ii) => ({
+      ii, tileCount: countItemTiles(group.items[ii]),
+    })).filter(d => d.tileCount > 0).sort((a, b) => a.tileCount - b.tileCount);
+
+    for (const { ii } of rankedItems) {
+      if (placed >= maxP) break;
+      for (const rot of rots) {
+        if (placed >= maxP) break;
+        let keepGoing = true;
+        while (keepGoing && placed < maxP) {
+          keepGoing = false;
+          let bestPos = null, bestScore = -Infinity;
+          for (const { r, c } of ctx.roomTiles) {
+            if (ctx.occupancy[r][c] >= 0) continue;
+            if (!canPlace(ctx, gi, ii, rot, r, c, undefined)) continue;
+            const posScore = scorePlacementPosition(ctx, gi, ii, rot, r, c);
+            if (posScore > bestScore) { bestScore = posScore; bestPos = { rot, row: r, col: c }; }
+          }
+          if (bestPos) {
+            if (placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
+              placed++;
+              keepGoing = true;
+              const st = getStats(ctx);
+              const pv = st[ctx.primaryStatIdx] ?? 0;
+              let done = true;
+              for (const rel of ctx.relativeIndices)
+                if ((st[rel.statIdx] ?? 0) < pv) { done = false; break; }
+              if (done) return;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 /** Place mandatory group items (min > 0) and storage. */
 function placeMandatoryItems(ctx) {
   const { furnitureSet: fs } = ctx;
@@ -1225,6 +1284,85 @@ async function localSearchPhase(ctx) {
         setOccupancy(ctx, pi);
       }
     }
+  }
+
+  await yieldToUI();
+
+  // Sub-pass A2: Relative-aware upgrade — clear relative items, try ONE primary upgrade,
+  // re-place relative items. Unlocks upgrades blocked by adjacent relative items (e.g. basins).
+  if (ctx.relativeIndices.length > 0) {
+    const a2Stats = getStats(ctx);
+    const a2Primary = a2Stats[ctx.primaryStatIdx] ?? 0;
+    const a2Score = scoreLayout(ctx);
+    const a2Snap = takeSnapshot(ctx);
+
+    // Remove all relative-only placements
+    for (let pi = ctx.placements.length - 1; pi >= ctx.lockedCount; pi--) {
+      const gInfo = ctx.groupInfo[ctx.placements[pi].groupIdx];
+      if (gInfo.hasRelative && !gInfo.hasPrimary) {
+        clearOccupancy(ctx, pi);
+        ctx.placements.splice(pi, 1);
+      }
+    }
+    rebuildGroupCounts(ctx);
+    const noRelSnap = takeSnapshot(ctx);
+    const noRelCount = ctx.placements.length;
+
+    // Try each single upgrade independently, pick the one with best final score
+    let bestA2Score = a2Score;
+    let bestA2Snap = a2Snap;
+
+    for (let pi = ctx.lockedCount; pi < noRelCount; pi++) {
+      restoreSnapshot(ctx, noRelSnap);
+      const p = ctx.placements[pi];
+      const group = fs.groups[p.groupIdx];
+      if (group.items.length <= 1) continue;
+      const origRow = p.row, origCol = p.col;
+
+      for (let newII = p.itemIdx + 1; newII < group.items.length; newII++) {
+        for (const [sr, sc] of SHIFT_OFFSETS) {
+          restoreSnapshot(ctx, noRelSnap);
+          const pp = ctx.placements[pi];
+          clearOccupancy(ctx, pi);
+          pp.itemIdx = newII;
+          pp.row = origRow + sr;
+          pp.col = origCol + sc;
+
+          const tiles = getCachedTiles(ctx, pp.groupIdx, newII, pp.rotation);
+          let fits = true;
+          for (let r = 0; r < tiles.length && fits; r++)
+            for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+              if (tiles[r][c] === null) continue;
+              const gr = pp.row + r, gc = pp.col + c;
+              if (gr < 0 || gr >= ctx.gridH || gc < 0 || gc >= ctx.gridW || !ctx.room[gr][gc]) fits = false;
+              else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+            }
+          if (fits && overlapsReserved(ctx, pp.groupIdx, newII, pp.rotation, pp.row, pp.col)) fits = false;
+
+          if (fits) {
+            setOccupancy(ctx, pi);
+            if (checkWalkability(ctx) && hasAnyDoorCandidate(ctx)) {
+              const upSnap = takeSnapshot(ctx);
+              // Try both large-first and small-first relative placement
+              for (const placeFn of [placeRelativeItems, placeRelativeItemsSmallFirst]) {
+                restoreSnapshot(ctx, upSnap);
+                if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+                placeFn(ctx);
+                const sc2 = scoreLayout(ctx);
+                const st2 = getStats(ctx);
+                const prim2 = st2[ctx.primaryStatIdx] ?? 0;
+                if (sc2 > bestA2Score && prim2 >= a2Primary) {
+                  bestA2Score = sc2;
+                  bestA2Snap = takeSnapshot(ctx);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    restoreSnapshot(ctx, bestA2Snap);
   }
 
   await yieldToUI();
@@ -2065,10 +2203,12 @@ function sortRoomTilesForConstruction(ctx, reverse) {
  * @param {number} [options.maxItemHeight] - restrict primary group items to this max height
  * @param {boolean} [options.mixedSizing] - evaluate all items at each step, pick best globally
  * @param {boolean} [options.preferLarger] - score by raw multiplier instead of density (favors bigger items)
+ * @param {boolean} [options.deferRelative] - defer relative item placement to end of pass (uses small-first)
+ * @param {boolean} [options.deferSecondary] - defer both efficiency and relative item placement to end of pass
  */
 async function constructivePass(ctx, options) {
   const { furnitureSet: fs } = ctx;
-  const { skipInterval = 0, heroRotate = 0, reverseScan = false, tryAllHeroSizes = false, maxItemHeight, mixedSizing = false, preferLarger = false } = options;
+  const { skipInterval = 0, heroRotate = 0, reverseScan = false, tryAllHeroSizes = false, maxItemHeight, mixedSizing = false, preferLarger = false, deferRelative = false, deferSecondary = false } = options;
   const sortedGroups = [...ctx.groupInfo].sort((a, b) => a.priority - b.priority);
 
   sortRoomTilesForConstruction(ctx, reverseScan);
@@ -2133,8 +2273,8 @@ async function constructivePass(ctx, options) {
           placed++;
           placementCount++;
           keepGoing = true;
-          if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
-          if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+          if (!deferSecondary && ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+          if (!(deferRelative || deferSecondary) && ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
         }
       }
     } else {
@@ -2161,8 +2301,8 @@ async function constructivePass(ctx, options) {
             placed++;
             placementCount++;
             keepGoing = true;
-            if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
-            if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+            if (!deferSecondary && ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+            if (!(deferRelative || deferSecondary) && ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
           }
         }
       }
@@ -2199,8 +2339,8 @@ async function constructivePass(ctx, options) {
         if (bestPos && placeItem(ctx, gi, ii, bestPos.rot, bestPos.row, bestPos.col)) {
           placed++;
           keepGoing = true;
-          if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
-          if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+          if (!deferSecondary && ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
+          if (!(deferRelative || deferSecondary) && ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
         }
       }
     }
@@ -2208,9 +2348,12 @@ async function constructivePass(ctx, options) {
     await yieldToUI();
   }
 
-  // Final stat passes
+  // Final stat passes — always run, catches up on deferred items
   if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);
-  if (ctx.relativeIndices.length > 0) placeRelativeItems(ctx);
+  if (ctx.relativeIndices.length > 0) {
+    if (deferRelative || deferSecondary) placeRelativeItemsSmallFirst(ctx);
+    else placeRelativeItems(ctx);
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2301,8 +2444,11 @@ export async function runOptimizer(input) {
       { skipInterval: 4, heroRotate: 0, reverseScan: true, tryAllHeroSizes: false },
       { skipInterval: 0, heroRotate: 2, reverseScan: false, tryAllHeroSizes: false },
       { skipInterval: 0, heroRotate: 3, reverseScan: false, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 4, reverseScan: false, tryAllHeroSizes: false },
       { skipInterval: 0, heroRotate: 1, reverseScan: true, tryAllHeroSizes: false },
       { skipInterval: 0, heroRotate: 2, reverseScan: true, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 3, reverseScan: true, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 4, reverseScan: true, tryAllHeroSizes: false },
       { skipInterval: 3, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false },
       { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true },
       { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: true, mixedSizing: true },
@@ -2326,19 +2472,69 @@ export async function runOptimizer(input) {
     }
   }
 
-  // Polish the best result
-  const bestPrePolish = bestSnapshot;
-  restoreSnapshot(ctx, bestSnapshot);
+  // Track best non-deferred result for fallback comparison
+  let bestCoreSnapshot = bestSnapshot;
 
-  await localSearchPhase(ctx);
-
-  await trimPhase(ctx);
-  doorPhase(ctx);
-
-  if (!validateFinal(ctx)) {
-    restoreSnapshot(ctx, bestPrePolish);
-    doorPhase(ctx);
+  // Deferred secondary strategies: place primary items without interleaved secondary items
+  // (efficiency and/or relative), then place secondary items at end of pass.
+  // Gives primary items maximum packing density.
+  const hasSecondary = (ctx.empIdx >= 0 && ctx.effIdx >= 0) || ctx.relativeIndices.length > 0;
+  if (hasSecondary && !isLargeRoom) {
+    const deferredConfigs = [
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: false, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 1, reverseScan: false, tryAllHeroSizes: false, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: true, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 1, reverseScan: false, tryAllHeroSizes: true, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true, deferSecondary: true },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true, mixedSizing: true, preferLarger: true, deferSecondary: true },
+    ];
+    for (const config of deferredConfigs) {
+      restoreSnapshot(ctx, initialSnapshot);
+      const result = await runStrategy(ctx, (c) => constructivePass(c, config));
+      if (result.score > bestScore) {
+        bestScore = result.score;
+        bestSnapshot = result.snapshot;
+      }
+    }
   }
+
+  // Polish a snapshot with SA
+  async function polishAndScore(snapshot) {
+    restoreSnapshot(ctx, snapshot);
+    await localSearchPhase(ctx);
+    await trimPhase(ctx);
+    doorPhase(ctx);
+    if (!validateFinal(ctx)) {
+      restoreSnapshot(ctx, snapshot);
+      doorPhase(ctx);
+    }
+    return { score: scoreLayout(ctx), snapshot: takeSnapshot(ctx) };
+  }
+
+  // Try polishing with multiple RNG seeds and keep the best result.
+  // SA is sensitive to RNG trajectory — different seeds find different local optima.
+  const polishSeeds = [ctx.rng.save(), ctx.baseSeed + 0x50015A];
+  // For large rooms, skip multi-seed polish (too expensive)
+  if (isLargeRoom) polishSeeds.length = 1;
+
+  const candidates = [bestSnapshot];
+  if (bestCoreSnapshot !== bestSnapshot) candidates.push(bestCoreSnapshot);
+
+  let bestFinalScore = -Infinity;
+  let bestFinalSnapshot = bestSnapshot;
+  for (const seed of polishSeeds) {
+    for (const snap of candidates) {
+      ctx.rng.restore(seed);
+      const result = await polishAndScore(snap);
+      if (result.score > bestFinalScore) {
+        bestFinalScore = result.score;
+        bestFinalSnapshot = result.snapshot;
+      }
+    }
+  }
+  restoreSnapshot(ctx, bestFinalSnapshot);
 
   return { room: ctx.room, placements: ctx.placements, doors: ctx.doors };
 }

@@ -242,6 +242,7 @@ body::after {
   align-items: center;
   gap: 16px;
   padding: 8px 24px;
+  max-width: calc(100vw - 24px);
   user-select: none;
   animation: title-entrance 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -1471,8 +1472,12 @@ body::after {
   background: var(--accent-gold-glow);
 }
 
-/* Hide zoom controls on non-graph tabs */
+/* Hide graph-only overlays on non-graph tabs (these are appended to body, not inside #view-graph) */
 body:has(.view.active:not(#view-graph)) .zoom-controls { display: none; }
+body:has(.view.active:not(#view-graph)) .onboarding-hint { display: none; }
+body:has(.view.active:not(#view-graph)) .focus-bar { display: none; }
+body:has(.view.active:not(#view-graph)) .edge-tooltip { display: none; }
+body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
 
 /* ── Tab bar ──────────────────────────────────────── */
 
@@ -3898,6 +3903,8 @@ body:has(.focus-bar) #breadcrumb-bar {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .city-select {
@@ -3912,6 +3919,9 @@ body:has(.focus-bar) #breadcrumb-bar {
   cursor: pointer;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
   max-width: 140px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .city-select:focus {
   border-color: var(--accent-gold-dim);
@@ -3935,6 +3945,9 @@ body:has(.focus-bar) #breadcrumb-bar {
   justify-content: center;
   padding: 0;
   cursor: pointer;
+  flex-shrink: 0;
+  overflow: hidden;
+  line-height: 1;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
 .city-btn:hover {
