@@ -168,7 +168,11 @@ function toggleHelp() {
     const title = TAB_TITLES[tab] || "Help";
     const contentFn = HELP_CONTENT[tab];
     el.querySelector(".help-modal-title").textContent = title;
-    el.querySelector(".help-modal-body").innerHTML = contentFn ? contentFn() : "";
+    const body = contentFn ? contentFn() : "";
+    const footer = `<div class="help-footer" style="margin-top:18px;padding-top:12px;border-top:1px solid var(--border-subtle);font-size:12px;color:var(--text-muted)">
+      Found a bug or have a suggestion? <a href="https://github.com/nobody0/syx-vis/issues" target="_blank" rel="noopener" style="color:var(--accent-gold)">Report it on GitHub</a>.
+    </div>`;
+    el.querySelector(".help-modal-body").innerHTML = body + footer;
   }
 
   el.classList.toggle("visible");
