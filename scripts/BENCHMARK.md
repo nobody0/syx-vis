@@ -31,8 +31,8 @@ Full rectangle, employees stat.
 ### 3. Hunter - 20x15
 Full rectangle, employees stat.
 - Starter: `http://localhost:8080/#planner/AuPNKM0rSS2Kz8svyk3MEeFnYGD__6_-_3M8BAMIAAA`
-- Best: **29 workers, 1 door** (walk avg=15.3, max=22)
-- Runtime: **3.4s**
+- Best: **29 workers, 1 door** (walk avg=22.9, max=45)
+- Runtime: **3.7s**
 
 ### 4. Lavatory - 12x12 semi-round
 Non-rectangular room. Primary stat: services (latrines).

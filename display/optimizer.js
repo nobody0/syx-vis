@@ -853,6 +853,55 @@ function analyzePhase(ctx) {
   ctx._candCount = 0;
 
   detectSymmetryAxes(ctx);
+  detectZonedCandidate(ctx);
+}
+
+/**
+ * Detect whether this room benefits from zoned storage packing.
+ * True when there's an efficiency-only group where ALL tiles are impassable blockers
+ * with NONE having mustBeReachable, plus a primary group that HAS mustBeReachable tiles.
+ */
+function detectZonedCandidate(ctx) {
+  ctx.isZonedCandidate = false;
+  ctx.zonedEffGroupIdx = -1;
+  if (ctx.empIdx < 0 || ctx.effIdx < 0) return;
+
+  const fs = ctx.furnitureSet;
+  let hasMRPrimary = false;
+  let effBlockerGroup = -1;
+
+  for (const gInfo of ctx.groupInfo) {
+    if (gInfo.hasPrimary) {
+      // Check if any tile in any item of this group has mustBeReachable
+      const group = fs.groups[gInfo.groupIdx];
+      for (const item of group.items)
+        for (const row of item.tiles)
+          for (const tileKey of row) {
+            if (tileKey === null) continue;
+            const tt = fs.tileTypes[tileKey];
+            if (tt?.mustBeReachable) hasMRPrimary = true;
+          }
+    }
+    if (gInfo.hasEfficiency && !gInfo.hasPrimary) {
+      // Check ALL tiles across ALL items are impassable with no mustBeReachable
+      const group = fs.groups[gInfo.groupIdx];
+      let allBlocker = true, anyMR = false;
+      for (const item of group.items)
+        for (const row of item.tiles)
+          for (const tileKey of row) {
+            if (tileKey === null) continue;
+            const tt = fs.tileTypes[tileKey];
+            if (!tt || !AVAIL_IMPASSABLE.has(tt.availability)) allBlocker = false;
+            if (tt?.mustBeReachable) anyMR = true;
+          }
+      if (allBlocker && !anyMR) effBlockerGroup = gInfo.groupIdx;
+    }
+  }
+
+  if (hasMRPrimary && effBlockerGroup >= 0) {
+    ctx.isZonedCandidate = true;
+    ctx.zonedEffGroupIdx = effBlockerGroup;
+  }
 }
 
 /**
@@ -1225,6 +1274,49 @@ function fillWithStrips(ctx, strip, horizontal, rect, skipSet) {
         }
       }
       currentCol += strip.selfCorridored ? strip.width : strip.width + 1;
+    }
+  }
+}
+
+/**
+ * Dense-pack items from a single group into a rectangular sub-region.
+ * No corridors, no scorePlacementPosition — pure greedy row-by-row packing.
+ * Suitable for groups where ALL tiles are impassable blockers with no mustBeReachable.
+ */
+function densePackZone(ctx, gi, rect) {
+  const { minR, minC, maxR, maxC } = rect;
+  const fs = ctx.furnitureSet;
+  const group = fs.groups[gi];
+  const rots = getAllowedRotations(group);
+  const maxP = group.max ?? 100;
+
+  // Sort items by multiplier-per-tile density descending (most efficient first)
+  const ranked = group.items.map((item, ii) => {
+    let tileCount = 0;
+    for (const row of item.tiles) for (const t of row) if (t !== null) tileCount++;
+    const mult = item.multiplierStats ?? item.multiplier;
+    return { ii, density: tileCount > 0 ? mult / tileCount : 0, tileCount };
+  }).sort((a, b) => b.density - a.density || b.tileCount - a.tileCount);
+
+  // Scan zone row-by-row, left-to-right, try each item+rotation at each free position
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      if (countGroupPlacements(ctx, gi) >= maxP) return;
+      if (ctx.occupancy[r][c] >= 0) continue;
+      if (!ctx.room[r][c]) continue;
+      for (const { ii } of ranked) {
+        let placed = false;
+        for (const rot of rots) {
+          const tiles = getCachedTiles(ctx, gi, ii, rot);
+          // Quick bounds check
+          const h = tiles.length;
+          if (r + h - 1 > maxR) continue;
+          const w = tiles[0]?.length ?? 0;
+          if (c + w - 1 > maxC) continue;
+          if (placeItem(ctx, gi, ii, rot, r, c)) { placed = true; break; }
+        }
+        if (placed) break;
+      }
     }
   }
 }
@@ -3480,6 +3572,143 @@ async function corridorConstructivePass(ctx, options) {
   for (const key of corridorKeys) ctx.reservedTiles.delete(key);
 }
 
+/**
+ * Zoned storage strategy: pack efficiency-only all-blocker group into zones at room edges,
+ * then fill remaining space with primary items via strip fill or constructive pass.
+ * Supports single zone (zoneEdge: top/bottom/left/right) and split zone (zoneEdge: 'split').
+ */
+async function zonedStorageStrategy(ctx, options) {
+  const { zoneEdge, zoneSize, useStrips, constructiveConfig, topSize, bottomSize } = options;
+  const gi = ctx.zonedEffGroupIdx;
+
+  // Compute room bounding box
+  let minR = ctx.gridH, maxR = 0, minC = ctx.gridW, maxC = 0;
+  for (const { r, c } of ctx.roomTiles) {
+    if (r < minR) minR = r; if (r > maxR) maxR = r;
+    if (c < minC) minC = c; if (c > maxC) maxC = c;
+  }
+
+  let primaryRect;
+  if (zoneEdge === 'split') {
+    // Split zone: pack storage at both top and bottom
+    const tS = topSize || 0, bS = bottomSize || 0;
+    if (tS > 0) {
+      densePackZone(ctx, gi, { minR, minC, maxR: Math.min(minR + tS - 1, maxR), maxC });
+    }
+    if (bS > 0) {
+      const bStart = Math.max(maxR - bS + 1, minR + tS);
+      densePackZone(ctx, gi, { minR: bStart, minC, maxR, maxC });
+    }
+    // Remove any isolated room tiles created by zone packing
+    removeIsolatedRoomTiles(ctx);
+    primaryRect = { minR: minR + tS, minC, maxR: maxR - bS, maxC };
+  } else {
+    // Single zone
+    let zoneRect;
+    if (zoneEdge === 'top') {
+      zoneRect = { minR, minC, maxR: Math.min(minR + zoneSize - 1, maxR), maxC };
+    } else if (zoneEdge === 'bottom') {
+      zoneRect = { minR: Math.max(maxR - zoneSize + 1, minR), minC, maxR, maxC };
+    } else if (zoneEdge === 'left') {
+      zoneRect = { minR, minC, maxR, maxC: Math.min(minC + zoneSize - 1, maxC) };
+    } else {
+      zoneRect = { minR, minC: Math.max(maxC - zoneSize + 1, minC), maxR, maxC };
+    }
+    densePackZone(ctx, gi, zoneRect);
+    removeIsolatedRoomTiles(ctx);
+
+    if (zoneEdge === 'top') primaryRect = { minR: zoneRect.maxR + 1, minC, maxR, maxC };
+    else if (zoneEdge === 'bottom') primaryRect = { minR, minC, maxR: zoneRect.minR - 1, maxC };
+    else if (zoneEdge === 'left') primaryRect = { minR, minC: zoneRect.maxC + 1, maxR, maxC };
+    else primaryRect = { minR, minC, maxR, maxC: zoneRect.minC - 1 };
+  }
+
+  // Fill remaining space with primary items
+  if (useStrips) {
+    await zonedStripFill(ctx, primaryRect);
+  } else {
+    await constructivePass(ctx, constructiveConfig || {});
+  }
+}
+
+/**
+ * Remove room tiles that became isolated (unreachable from main walkable area) after zone packing.
+ */
+function removeIsolatedRoomTiles(ctx) {
+  const { gridW, gridH, room, blockerCount } = ctx;
+
+  // BFS from first non-blocked room tile
+  const visited = new Uint8Array(gridW * gridH);
+  const queue = [];
+  let seeded = false;
+  for (let r = 0; r < gridH && !seeded; r++)
+    for (let c = 0; c < gridW && !seeded; c++)
+      if (room[r][c] && blockerCount[r][c] === 0) {
+        visited[r * gridW + c] = 1;
+        queue.push(r, c);
+        seeded = true;
+      }
+
+  let i = 0;
+  while (i < queue.length) {
+    const cr = queue[i++], cc = queue[i++];
+    for (const [dr, dc] of DIRS) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      const key = nr * gridW + nc;
+      if (visited[key] || !room[nr][nc] || blockerCount[nr][nc] > 0) continue;
+      visited[key] = 1;
+      queue.push(nr, nc);
+    }
+  }
+
+  // Remove unvisited non-blocked room tiles
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c] && blockerCount[r][c] === 0 && !visited[r * gridW + c]) {
+        removeRoomTile(ctx, r, c);
+      }
+}
+
+/**
+ * Strip fill with a restricted rect (avoids zone area).
+ */
+async function zonedStripFill(ctx, primaryRect) {
+  const candidates = discoverStripCandidates(ctx);
+  if (candidates.length === 0) return;
+
+  const topCandidates = candidates.slice(0, Math.min(8, candidates.length));
+  let bestSnap = null, bestPVal = -Infinity;
+  const snap0 = takeLightSnapshot(ctx);
+
+  for (const strip of topCandidates) {
+    for (const horiz of [true, false]) {
+      restoreLightSnapshot(ctx, snap0);
+      fillWithStrips(ctx, strip, horiz, primaryRect);
+      const stats = getStats(ctx);
+      const pval = stats[ctx.primaryStatIdx] ?? 0;
+      if (pval > bestPVal) { bestPVal = pval; bestSnap = takeLightSnapshot(ctx); }
+    }
+    // Also try rotated strips
+    const group = ctx.furnitureSet.groups[strip.groupIdx];
+    const rots = getAllowedRotations(group);
+    for (const altRot of rots) {
+      if (altRot === strip.rotation) continue;
+      const altProfile = computeTileProfile(ctx, strip.groupIdx, strip.itemIdx, altRot);
+      const altStrip = { ...strip, rotation: altRot, height: altProfile.height, width: altProfile.width,
+        pitch: altProfile.pitch, selfCorridored: altProfile.selfCorridored, backToBack: altProfile.backToBack };
+      for (const horiz of [true, false]) {
+        restoreLightSnapshot(ctx, snap0);
+        fillWithStrips(ctx, altStrip, horiz, primaryRect);
+        const stats = getStats(ctx);
+        const pval = stats[ctx.primaryStatIdx] ?? 0;
+        if (pval > bestPVal) { bestPVal = pval; bestSnap = takeLightSnapshot(ctx); }
+      }
+    }
+  }
+  if (bestSnap) restoreLightSnapshot(ctx, bestSnap);
+}
+
 // ══════════════════════════════════════════════════════════
 // Main entry point
 // ══════════════════════════════════════════════════════════
@@ -3666,8 +3895,63 @@ export async function runOptimizer(input) {
     }
   }
 
+  // Zoned storage strategies (pack efficiency blockers into a zone, fill rest with primary)
+  const zonedConfigs = [];
+  if (ctx.isZonedCandidate && !isLargeRoom) {
+    // Find room bounding box for zone sizing
+    let zMinR = ctx.gridH, zMaxR = 0, zMinC = ctx.gridW, zMaxC = 0;
+    for (const { r, c } of ctx.roomTiles) {
+      if (r < zMinR) zMinR = r; if (r > zMaxR) zMaxR = r;
+      if (c < zMinC) zMinC = c; if (c > zMaxC) zMaxC = c;
+    }
+    const zRoomH = zMaxR - zMinR + 1;
+    const zRoomW = zMaxC - zMinC + 1;
+
+    // Find max item height in the efficiency group
+    const effGroup = ctx.furnitureSet.groups[ctx.zonedEffGroupIdx];
+    let maxEffH = 1, maxEffW = 1;
+    for (const item of effGroup.items) {
+      maxEffH = Math.max(maxEffH, item.tiles.length);
+      for (const row of item.tiles) maxEffW = Math.max(maxEffW, row.length);
+    }
+
+    const baseZonedConfig = { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false };
+    const altZonedConfig = { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true };
+    // Zone can be up to 50% of room dimension — larger zones provide more efficiency
+    const maxZoneH = Math.floor(zRoomH * 0.5);
+    const maxZoneW = Math.floor(zRoomW * 0.5);
+
+    // Try top/bottom zone edges with zone sizes from maxEffH to maxZoneH, stepping by 1
+    for (const edge of ['top', 'bottom']) {
+      for (let zoneSize = maxEffH; zoneSize <= maxZoneH; zoneSize++) {
+        zonedConfigs.push({ zoneEdge: edge, zoneSize, useStrips: true });
+        zonedConfigs.push({ zoneEdge: edge, zoneSize, useStrips: false, constructiveConfig: baseZonedConfig });
+        zonedConfigs.push({ zoneEdge: edge, zoneSize, useStrips: false, constructiveConfig: altZonedConfig });
+      }
+    }
+    // Try left/right zone edges with fewer sizes (step by maxEffW)
+    for (const edge of ['left', 'right']) {
+      for (let zoneSize = maxEffW; zoneSize <= maxZoneW; zoneSize += maxEffW) {
+        zonedConfigs.push({ zoneEdge: edge, zoneSize, useStrips: true });
+        zonedConfigs.push({ zoneEdge: edge, zoneSize, useStrips: false, constructiveConfig: baseZonedConfig });
+        zonedConfigs.push({ zoneEdge: edge, zoneSize, useStrips: false, constructiveConfig: altZonedConfig });
+      }
+    }
+
+    // Split zones: storage at both top AND bottom edges
+    // This provides more efficiency while keeping the work area contiguous in the middle
+    for (let tS = maxEffH; tS <= Math.min(maxZoneH, 3); tS++) {
+      for (let bS = maxEffH; bS <= Math.min(maxZoneH, 3); bS++) {
+        if (tS + bS > maxZoneH) continue; // don't over-zone
+        zonedConfigs.push({ zoneEdge: 'split', topSize: tS, bottomSize: bS, useStrips: true });
+        zonedConfigs.push({ zoneEdge: 'split', topSize: tS, bottomSize: bS, useStrips: false, constructiveConfig: baseZonedConfig });
+        zonedConfigs.push({ zoneEdge: 'split', topSize: tS, bottomSize: bS, useStrips: false, constructiveConfig: altZonedConfig });
+      }
+    }
+  }
+
   const deferredCount = hasSecondary ? 8 : 0;
-  const totalStrategies = 1 + constructiveConfigs.length + mirrorConfigs.length + rotationalConfigs.length + tilingConfigs.length + corridorConfigs.length + deferredCount;
+  const totalStrategies = 1 + constructiveConfigs.length + mirrorConfigs.length + rotationalConfigs.length + tilingConfigs.length + corridorConfigs.length + zonedConfigs.length + deferredCount;
   let strategiesDone = 1; // strip already done
   // Strategies span 0.02–0.70 of progress
   const STRAT_START = 0.02, STRAT_END = 0.70;
@@ -3762,6 +4046,25 @@ export async function runOptimizer(input) {
       strategiesDone++;
     }
     traceEnd('strategies:corridor');
+  }
+
+  // Zoned storage strategies
+  if (zonedConfigs.length > 0) {
+    traceStart('strategies:zoned');
+    for (const config of zonedConfigs) {
+      const p = STRAT_START + (STRAT_END - STRAT_START) * (strategiesDone / totalStrategies);
+      reportProgress('Searching', `Zoned ${strategiesDone + 1} / ${totalStrategies}`, p);
+      traceStart('strategy:zoned');
+      restoreLightSnapshot(ctx, initialSnapshot);
+      const result = await runStrategy(ctx, (c) => zonedStorageStrategy(c, config));
+      if (result.score > bestScore) {
+        bestScore = result.score;
+        bestSnapshot = result.snapshot;
+      }
+      traceEnd('strategy:zoned');
+      strategiesDone++;
+    }
+    traceEnd('strategies:zoned');
   }
 
   // Track best non-deferred result for fallback comparison
