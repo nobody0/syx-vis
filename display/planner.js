@@ -24,6 +24,9 @@ import {
 
 const LS_KEY = "syx-vis-planner-state";
 
+// Mobile detection — read-only view on touch/narrow screens
+const isMobile = matchMedia("(max-width: 768px)").matches || matchMedia("(pointer: coarse)").matches;
+
 // ── Data lookup ─────────────────────────────────────────
 
 /** @type {Map<string, import('../types.js').FurnitureSet>} */
@@ -588,7 +591,16 @@ function buildGrid(container) {
     cellEls.push(row);
   }
 
-  // Mouse interaction
+  // Mouse interaction (desktop only — mobile is read-only)
+  if (isMobile) {
+    // Dimension label (floating overlay inside grid)
+    dimLabelEl = el("div", "planner-dim-label-live");
+    dimLabelEl.style.display = "none";
+    gridEl.appendChild(dimLabelEl);
+    container.appendChild(gridEl);
+    return;
+  }
+
   let painting = false;
   let paintValue = true; // draw=true, erase=false
   let rectStart = null;  // {r, c} for rectangle shape
@@ -2806,8 +2818,14 @@ export function renderPlanner(container) {
   // Building selector row
   buildSelector(content);
 
-  // Toolbar
-  buildToolbar(content);
+  // Toolbar (desktop only)
+  if (isMobile) {
+    const note = el("div", "planner-mobile-note");
+    note.innerHTML = "<strong>View-only mode</strong> — editing requires a desktop browser";
+    content.appendChild(note);
+  } else {
+    buildToolbar(content);
+  }
 
   // Main layout: grid + sidebar
   const main = el("div", "planner-main");
@@ -2851,13 +2869,13 @@ export function renderPlanner(container) {
   // Apply disabled state if no building selected
   updateDisabledState();
 
-  // Install keyboard handler
-  document.addEventListener("keydown", onKeyDown);
-
-  // Clear shift-hover highlight on shift release
-  document.addEventListener("keyup", (e) => {
-    if (e.key === "Shift") clearRemoveHighlight();
-  });
+  // Install keyboard handler (desktop only)
+  if (!isMobile) {
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keyup", (e) => {
+      if (e.key === "Shift") clearRemoveHighlight();
+    });
+  }
 
   // Flush pending URL sync on page unload
   window.addEventListener("beforeunload", () => flushSyncUrl());

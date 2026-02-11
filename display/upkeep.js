@@ -11,7 +11,7 @@ export function renderUpkeep(container) {
   html.push(`<h2>Building Upkeep</h2>`);
   html.push(`<p>Buildings with a value degradation rate consume construction materials over time to maintain their value. Maintenance cost per year = construction cost &times; degrade rate.</p>`);
 
-  html.push(`<table class="calc-table">`);
+  html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
   html.push(`<thead><tr>
     <th>Building</th>
     <th style="text-align:right">Degrade Rate (/yr)</th>
@@ -38,14 +38,14 @@ export function renderUpkeep(container) {
     }
   }
 
-  html.push(`</tbody></table>`);
+  html.push(`</tbody></table></div>`);
 
   html.push(`<div class="note">Only ${degrading.length} buildings have explicit degradation rates in game data (${degrading.map(b => b.name).join(", ")}). General janitor-based maintenance is engine-level and not reflected here.</div>`);
 
   // Summary: total annual resource demand per building instance
   html.push(`<h3>Total Annual Maintenance per Instance</h3>`);
   html.push(`<div class="upkeep-summary-wrap">`);
-  html.push(`<table class="calc-table">`);
+  html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
   html.push(`<thead><tr>
     <th>Building</th>
     <th>Annual Resource Cost</th>
@@ -62,7 +62,7 @@ export function renderUpkeep(container) {
     </tr>`);
   }
 
-  html.push(`</tbody></table>`);
+  html.push(`</tbody></table></div>`);
   html.push(`</div>`);
   html.push(`</div>`);
   container.innerHTML = html.join("\n");

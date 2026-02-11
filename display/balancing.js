@@ -193,7 +193,7 @@ function runCalculation(resourceId, rate, resultsDiv) {
 
   const html = [];
   html.push(`<h3>Production Chain: ${rate} ${resName}/day</h3>`);
-  html.push(`<table class="calc-table">`);
+  html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
   html.push(`<thead><tr>
     <th>Step</th>
     <th>Building</th>
@@ -268,7 +268,7 @@ function runCalculation(resourceId, rate, resultsDiv) {
     </tr>`);
   }
 
-  html.push(`</tbody></table>`);
+  html.push(`</tbody></table></div>`);
 
   // Summary card: total workers + diagnostics
   const productionSteps = steps.filter(s => !s.terminal && !s.warning);

@@ -84,10 +84,52 @@ export function createZoomController(container, canvas, opts = {}) {
     applyTransform();
   }
 
+  // ── Pinch-to-zoom (multi-touch) ──
+  const activePointers = new Map(); // pointerId → {x, y}
+  let pinching = false;
+  let pinchStartDist = 0;
+  let pinchStartScale = 1;
+  let pinchStartX = 0;  // container X at pinch start
+  let pinchStartY = 0;
+  let pinchMidX = 0;    // screen midpoint at pinch start
+  let pinchMidY = 0;
+
+  function pointerDist() {
+    const pts = [...activePointers.values()];
+    if (pts.length < 2) return 0;
+    const dx = pts[0].x - pts[1].x;
+    const dy = pts[0].y - pts[1].y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function pointerMid() {
+    const pts = [...activePointers.values()];
+    if (pts.length < 2) return { x: 0, y: 0 };
+    return { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+  }
+
   // ── Pointer drag ──
   function onPointerDown(e) {
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // Start pinch when 2 fingers are down
+    if (activePointers.size === 2) {
+      pinching = true;
+      dragging = false;
+      pinchStartDist = pointerDist();
+      pinchStartScale = state.scale;
+      pinchStartX = state.x;
+      pinchStartY = state.y;
+      const mid = pointerMid();
+      pinchMidX = mid.x;
+      pinchMidY = mid.y;
+      cancelAnimation();
+      return;
+    }
+
     // Only drag on middle button or left button when not on interactive child
     if (e.button !== 0 && e.button !== 1) return;
+    if (pinching) return;
     dragging = true;
     wasDragged = false;
     dragStartX = e.clientX;
@@ -99,6 +141,35 @@ export function createZoomController(container, canvas, opts = {}) {
   }
 
   function onPointerMove(e) {
+    if (activePointers.has(e.pointerId)) {
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    // Pinch zoom
+    if (pinching && activePointers.size >= 2) {
+      const dist = pointerDist();
+      if (pinchStartDist > 0) {
+        const rect = canvas.getBoundingClientRect();
+        const factor = dist / pinchStartDist;
+        const newScale = Math.min(state.maxScale, Math.max(state.minScale, pinchStartScale * factor));
+
+        // Zoom toward pinch midpoint
+        const worldX = (pinchMidX - rect.left - pinchStartX) / pinchStartScale;
+        const worldY = (pinchMidY - rect.top - pinchStartY) / pinchStartScale;
+        state.scale = newScale;
+        state.x = (pinchMidX - rect.left) - worldX * newScale;
+        state.y = (pinchMidY - rect.top) - worldY * newScale;
+
+        // Also pan with midpoint movement
+        const mid = pointerMid();
+        state.x += mid.x - pinchMidX;
+        state.y += mid.y - pinchMidY;
+
+        applyTransform();
+      }
+      return;
+    }
+
     if (!dragging) return;
     const dx = e.clientX - dragStartX;
     const dy = e.clientY - dragStartY;
@@ -110,7 +181,15 @@ export function createZoomController(container, canvas, opts = {}) {
     applyTransform();
   }
 
-  function onPointerUp() {
+  function onPointerUp(e) {
+    activePointers.delete(e.pointerId);
+    if (pinching) {
+      if (activePointers.size < 2) {
+        pinching = false;
+        wasDragged = true; // prevent tap after pinch
+      }
+      return;
+    }
     if (dragging) {
       dragging = false;
       canvas.style.cursor = "";
@@ -120,6 +199,7 @@ export function createZoomController(container, canvas, opts = {}) {
   // Bind events
   canvas.addEventListener("wheel", onWheel, { passive: false });
   canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.style.touchAction = "none"; // prevent browser pan/zoom on touch
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp);
 

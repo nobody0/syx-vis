@@ -4725,6 +4725,16 @@ body:has(.focus-bar) #breadcrumb-bar {
   background: var(--accent-gold);
 }
 
+/* ── Table scroll wrapper (mobile horizontal scroll) ── */
+
+.table-scroll-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.table-scroll-wrap .calc-table {
+  min-width: 600px;
+}
+
 /* ── Responsive overlap prevention ─────────────────── */
 @media (max-width: 1100px) {
   #stats-bar { display: none; }
@@ -4734,4 +4744,140 @@ body:has(.focus-bar) #breadcrumb-bar {
   .planner-main { flex-direction: column; }
   .planner-grid-wrap { max-width: 100%; }
   .planner-sidebar { max-width: 100%; max-height: none; }
+}
+
+/* ── Tablet / large phone ─────────────────────────── */
+@media (max-width: 768px) {
+  /* Header: compact */
+  #header-bar {
+    gap: 8px;
+    padding: 6px 12px;
+    top: 6px;
+  }
+  #header-bar h1 { font-size: 15px; }
+  #header-bar .subtitle { display: none; }
+  .header-sep { display: none; }
+
+  /* Tab buttons: smaller */
+  #tab-bar .tab {
+    font-size: 11px;
+    padding: 5px 8px;
+  }
+  #tab-bar .tab .tab-icon { display: none; }
+
+  /* Detail panel: bottom sheet */
+  #detail-panel {
+    top: auto;
+    bottom: 0;
+    right: 0;
+    width: 100%;
+    max-height: 50vh;
+    border-radius: var(--panel-radius) var(--panel-radius) 0 0;
+    transform: translateY(16px);
+  }
+  #detail-panel.open {
+    transform: translateY(0);
+  }
+
+  /* Filter panel: auto-collapse handled in JS; make it narrower */
+  #filter-panel {
+    width: 220px;
+    max-height: calc(100vh - 56px);
+    top: 50px;
+  }
+
+  /* Breadcrumb: full-width, smaller */
+  #breadcrumb-bar {
+    top: 46px;
+    max-width: 90vw;
+    font-size: 10px;
+    padding: 4px 10px;
+  }
+
+  /* Calc tabs: tighter spacing */
+  .calc-content {
+    margin-top: 56px;
+    padding: 0 12px;
+  }
+
+  /* Planner: tighter spacing */
+  .planner-content {
+    margin-top: 56px;
+    padding: 0 12px;
+  }
+
+  /* Zoom controls: bottom-left to avoid overlap with detail panel */
+  .zoom-controls {
+    bottom: 14px;
+    right: 8px;
+  }
+
+  /* Legend: hide on tablet to save space */
+  #legend { display: none; }
+
+  /* Tap targets: minimum 44px */
+  #tab-bar .tab { min-height: 44px; }
+  .filter-collapse-btn { min-width: 44px; min-height: 44px; }
+  .zoom-controls button { min-width: 44px; min-height: 44px; }
+
+  /* Font baseline */
+  html { font-size: 14px; }
+}
+
+/* ── Phone portrait ───────────────────────────────── */
+@media (max-width: 480px) {
+  /* Header: stack title above tabs */
+  #header-bar {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+    padding: 4px 8px;
+    top: 4px;
+  }
+  #header-title { width: 100%; text-align: center; }
+  #header-bar h1 { font-size: 14px; }
+  #tab-bar { flex-wrap: wrap; justify-content: center; gap: 1px; }
+  #tab-bar .tab {
+    font-size: 10px;
+    padding: 4px 6px;
+  }
+
+  /* Filter panel: full-width overlay */
+  #filter-panel {
+    width: calc(100vw - 16px);
+    left: 8px;
+    top: auto;
+    bottom: 8px;
+    max-height: 60vh;
+  }
+
+  /* Detail panel: full-width bottom sheet */
+  #detail-panel {
+    max-height: 60vh;
+  }
+
+  /* Breadcrumb: full-width */
+  #breadcrumb-bar {
+    max-width: calc(100vw - 16px);
+    font-size: 9px;
+  }
+
+  /* Planner content */
+  .planner-content { padding: 0 6px; }
+  .calc-content { padding: 0 6px; }
+
+  /* Mobile-only planner note */
+  .planner-mobile-note {
+    padding: 12px 16px;
+    background: rgba(224, 170, 56, 0.08);
+    border: 1px solid rgba(224, 170, 56, 0.2);
+    border-radius: 5px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+  .planner-mobile-note strong {
+    color: var(--accent-gold-dim);
+  }
 }

@@ -32,7 +32,7 @@ function buildPopulationContent(container, selectedSpeciesId) {
   // ── Food/Drink Preferences (species-specific) ──
   if (selectedSpecies) {
     html.push(`<h3>${selectedSpecies.name} — Food & Drink Preferences</h3>`);
-    html.push(`<table class="calc-table">`);
+    html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
     html.push(`<thead><tr><th>Type</th><th>Preferred</th></tr></thead><tbody>`);
 
     const foodList = (selectedSpecies.preferredFood || []).map(f =>
@@ -45,25 +45,25 @@ function buildPopulationContent(container, selectedSpeciesId) {
     ).join(", ") || "None specified";
     html.push(`<tr><td><strong>Drink</strong></td><td>${drinkList}</td></tr>`);
 
-    html.push(`</tbody></table>`);
+    html.push(`</tbody></table></div>`);
 
     // Military supply overrides
     if (selectedSpecies.militarySupplyUse) {
       html.push(`<h3>${selectedSpecies.name} — Military Supply Overrides</h3>`);
-      html.push(`<table class="calc-table">`);
+      html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
       html.push(`<thead><tr><th>Resource</th><th style="text-align:right">Multiplier</th><th>Effect</th></tr></thead><tbody>`);
       for (const [res, mult] of Object.entries(selectedSpecies.militarySupplyUse)) {
         const effect = mult === 0 ? "No consumption" : `${mult}x normal`;
         const cls = mult === 0 ? ' style="color:var(--state-ignored)"' : "";
         html.push(`<tr><td>${formatResourceName(res)}</td><td class="num">${mult}</td><td${cls}>${effect}</td></tr>`);
       }
-      html.push(`</tbody></table>`);
+      html.push(`</tbody></table></div>`);
     }
 
     // Population traits
     if (selectedSpecies.population) {
       html.push(`<h3>${selectedSpecies.name} — Population</h3>`);
-      html.push(`<table class="calc-table">`);
+      html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
       html.push(`<thead><tr><th>Trait</th><th style="text-align:right">Value</th></tr></thead><tbody>`);
       const pop = selectedSpecies.population;
       if (pop.max != null) html.push(`<tr><td>Max population multiplier</td><td class="num">${pop.max}</td></tr>`);
@@ -79,13 +79,13 @@ function buildPopulationContent(container, selectedSpeciesId) {
           html.push(`<tr><td>Terrain: ${capitalize(k.toLowerCase())}</td><td class="num">${v}</td></tr>`);
         }
       }
-      html.push(`</tbody></table>`);
+      html.push(`</tbody></table></div>`);
     }
   }
 
   // ── Equipment Consumption ──
   html.push(`<h3>Equipment Consumption</h3>`);
-  html.push(`<table class="calc-table">`);
+  html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
 
   const hasSpecies = !!selectedSpecies;
   const disabledSet = new Set(selectedSpecies?.equipmentDisabled || []);
@@ -130,12 +130,12 @@ function buildPopulationContent(container, selectedSpeciesId) {
     }
   }
 
-  html.push(`</tbody></table>`);
+  html.push(`</tbody></table></div>`);
   html.push(`<div class="note">Wear rate is the fraction of one unit consumed per person per day. A wear rate of 0.25 means each person consumes 0.25 units/day when fully equipped.</div>`);
 
   // ── Need Fulfillment ──
   html.push(`<h3>Need Fulfillment</h3>`);
-  html.push(`<table class="calc-table">`);
+  html.push(`<div class="table-scroll-wrap"><table class="calc-table">`);
   html.push(`<thead><tr>
     <th>Need</th>
     <th style="text-align:right">Base Rate (/day)</th>
@@ -172,7 +172,7 @@ function buildPopulationContent(container, selectedSpeciesId) {
     </tr>`);
   }
 
-  html.push(`</tbody></table>`);
+  html.push(`</tbody></table></div>`);
   html.push(`<div class="note">Rate is the per-capita daily consumption of the need. Event size indicates how many people attend a single service event (arenas, speakers, stages).${hasSpecies ? ` Species rates show ${selectedSpecies.name}-specific multipliers applied to the base rate.` : ''}</div>`);
 
   html.push(`</div>`);

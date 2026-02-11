@@ -1050,6 +1050,14 @@ async function initRenderer() {
   detailResTooltip.id = "detail-res-tooltip";
   document.body.appendChild(detailResTooltip);
 
+  // Dismiss tooltip on click-outside (for touch tap-toggle)
+  document.addEventListener("click", () => {
+    if (detailResTooltip) {
+      detailResTooltip.classList.remove("visible");
+      detailResTooltip._activeNode = null;
+    }
+  });
+
   const container = document.getElementById("graph-container");
 
   // Create PixiJS Application
@@ -2161,7 +2169,7 @@ function openDetailForNode(d) {
     const node = linkEl.node();
     if (!node || !detailResTooltip) return;
 
-    node.addEventListener("mouseenter", () => {
+    function showResHover() {
       let entries;
       let header;
       if (role === "input") {
@@ -2189,10 +2197,24 @@ function openDetailForNode(d) {
       const rect = node.getBoundingClientRect();
       detailResTooltip.classList.add("visible");
       positionTooltip(detailResTooltip, rect.left - 14, rect.bottom - 6);
-    });
+    }
 
+    // Mouse hover (desktop)
+    node.addEventListener("mouseenter", showResHover);
     node.addEventListener("mouseleave", () => {
       detailResTooltip.classList.remove("visible");
+    });
+
+    // Tap toggle (touch devices)
+    node.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (detailResTooltip.classList.contains("visible") && detailResTooltip._activeNode === node) {
+        detailResTooltip.classList.remove("visible");
+        detailResTooltip._activeNode = null;
+      } else {
+        showResHover();
+        detailResTooltip._activeNode = node;
+      }
     });
   }
 

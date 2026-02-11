@@ -778,6 +778,11 @@ export function buildFilterPanel(fullNodes, fullEdges, onFilterChange, navigateT
     panel.classList.toggle("collapsed");
     collapseBtn.textContent = panel.classList.contains("collapsed") ? "\u00BB" : "\u00AB";
   });
+  // Auto-collapse on mobile/tablet
+  if (matchMedia("(max-width: 768px)").matches) {
+    panel.classList.add("collapsed");
+    collapseBtn.textContent = "\u00BB";
+  }
   header.appendChild(collapseBtn);
   panel.appendChild(header);
 
