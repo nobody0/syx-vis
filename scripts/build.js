@@ -1,6 +1,6 @@
 // esbuild bundler — bundles display/main.js → dist/ with tree-shaking + minification
-import { build } from "esbuild";
-import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, existsSync } from "fs";
+import { build, transform } from "esbuild";
+import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, existsSync, readdirSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -48,7 +48,29 @@ html = html.replace('src="display/main.js"', 'src="main.js"');
 
 writeFileSync(join(dist, "index.html"), html);
 
-// Copy CSS
-cpSync(join(root, "display/style.css"), join(dist, "style.css"));
+// Minify CSS
+console.log("Minifying CSS...");
+const css = readFileSync(join(root, "display/style.css"), "utf8");
+const { code: minCss } = await transform(css, { loader: "css", minify: true });
+writeFileSync(join(dist, "style.css"), minCss);
 
-console.log("Build complete → dist/");
+// Size report
+function dirSize(dir) {
+  let total = 0;
+  for (const f of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, f.name);
+    total += f.isDirectory() ? dirSize(p) : statSync(p).size;
+  }
+  return total;
+}
+function fmt(bytes) {
+  return bytes < 1024 ? bytes + " B" : (bytes / 1024).toFixed(1) + " KB";
+}
+console.log("\nBuild output:");
+for (const f of readdirSync(dist, { withFileTypes: true })) {
+  const p = join(dist, f.name);
+  const size = f.isDirectory() ? dirSize(p) : statSync(p).size;
+  console.log(`  ${f.name.padEnd(20)} ${fmt(size).padStart(10)}`);
+}
+console.log(`  ${"TOTAL".padEnd(20)} ${fmt(dirSize(dist)).padStart(10)}`);
+console.log("\nBuild complete → dist/");

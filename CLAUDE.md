@@ -3,8 +3,8 @@
 ## Global Rules
 
 1. **No made-up data.** Data files are auto-generated from the game's `data.zip` via `scripts/extract-game-data.js`. Do not hand-edit `data/resources.js`, `data/buildings.js`, `data/needs.js`, `data/tech.js`, `data/equipment.js`, or `data/races.js` — re-run the extraction script instead.
-2. **esbuild bundling for production.** `npm run build` bundles `display/main.js` → `dist/` with tree-shaking + minification. `npm run dev` serves raw source for development (no build step needed). Dependencies (`pixi.js`, `d3-selection`) are installed locally via npm.
-3. **Libraries via npm.** `d3-selection` (not full D3) and `pixi.js` installed as dependencies, bundled by esbuild. Layout is custom (`derive/layout.js`).
+2. **esbuild bundling for production.** `npm run build` bundles `display/main.js` → `dist/` with tree-shaking + minification. `npm run dev` serves raw source for development (no build step needed). `pixi.js` is installed locally via npm.
+3. **Libraries via npm.** `pixi.js` installed as a dependency, bundled by esbuild. DOM helpers via `display/dom.js` (tiny chainable wrapper). Layout is custom (`derive/layout.js`).
 4. **Bipartite graph model.** Both resources AND buildings are nodes. Resources are circles (colored by resource category). Buildings are rounded rectangles (colored by building category). Recipes are edges: input resources → building → output resources.
 5. **Columns = build-cost score** (construction materials × tech costs). Layout bands: materials (top), civilian, services, military (bottom).
 6. **Keep it simple.** No over-engineering. Minimal CSS. Single `index.html` entry point. Dev: `npm run dev`. Production: `npm run build && npm start`.

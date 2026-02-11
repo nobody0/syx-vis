@@ -8,7 +8,7 @@ import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAN
 import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
 import { createZoomController } from "./pixi-zoom.js";
 
-import * as d3 from "d3-selection";
+import { select } from "./dom.js";
 
 // Node dimensions
 const RESOURCE_R = 32;
@@ -2170,7 +2170,7 @@ function renderProducerComparison(panel, resourceId, producers, navToNode, appen
 }
 
 function openDetailForNode(d) {
-  const panel = d3.select("#detail-panel");
+  const panel = select("#detail-panel");
   panel.classed("open", true);
   panel.html("");
 
@@ -2878,34 +2878,34 @@ function buildCitySelector(onFilterChange) {
   const activeCityId = getActiveCityId();
 
   // Select dropdown
-  const select = document.createElement("select");
-  select.className = "city-select";
-  select.setAttribute("aria-label", "Select city");
+  const selectEl = document.createElement("select");
+  selectEl.className = "city-select";
+  selectEl.setAttribute("aria-label", "Select city");
 
   const exploreOpt = document.createElement("option");
   exploreOpt.value = "";
   exploreOpt.textContent = "-- Explore --";
   if (!activeCityId) exploreOpt.selected = true;
-  select.appendChild(exploreOpt);
+  selectEl.appendChild(exploreOpt);
 
   for (const city of cities) {
     const opt = document.createElement("option");
     opt.value = city.id;
     opt.textContent = city.name;
     if (city.id === activeCityId) opt.selected = true;
-    select.appendChild(opt);
+    selectEl.appendChild(opt);
   }
 
-  select.addEventListener("change", () => {
-    if (select.value) {
-      switchCity(select.value);
+  selectEl.addEventListener("change", () => {
+    if (selectEl.value) {
+      switchCity(selectEl.value);
     } else {
       deactivateCity();
     }
     buildCitySelector(onFilterChange);
     onFilterChange();
   });
-  container.appendChild(select);
+  container.appendChild(selectEl);
 
   // New city button
   const addBtn = document.createElement("button");
