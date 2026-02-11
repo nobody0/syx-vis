@@ -185,18 +185,22 @@ function computeProductionCosts(nodes, edges) {
 
 /**
  * Compute build score for a building.
- * buildScore = (constructionCostScore + 1) * (techCostScore + 1)
+ * buildScore = sqrt(constructionCostScore) + sqrt(techCostScore) + 1
+ * Additive sqrt compresses the two independent cost axes onto the same scale,
+ * preventing explosive scores when both are nonzero (e.g. temples: 40k → ~30).
  * @param {Object} building
  * @param {Map<string, number>} productionCosts
  * @returns {number}
  */
 function computeBuildScore(building, productionCosts) {
-  // Construction cost score
+  // Construction cost score: max production cost across required resources.
+  // Amount is irrelevant for chain depth — needing 20 wood vs 2 wood doesn't
+  // change when you can build it. The bottleneck is the most advanced resource.
   let constructionScore = 0;
   if (building.constructionCosts) {
     for (const cost of building.constructionCosts) {
       const resCost = productionCosts.get(cost.resource) || 100;
-      constructionScore += resCost * cost.amount;
+      constructionScore = Math.max(constructionScore, resCost);
     }
   }
 
@@ -208,13 +212,14 @@ function computeBuildScore(building, productionCosts) {
     }
   }
 
-  return (constructionScore + 1) * (techScore + 1);
+  return Math.sqrt(constructionScore) + Math.sqrt(techScore) + 1;
 }
 
 /**
  * Compute path-cost scores for all resources.
  * For each producer of resource R:
- *   - Extraction (no inputs): pathCost = buildScore
+ *   - Gathering (no building): pathCost = 0 (tier 0, always leftmost)
+ *   - Extraction (building, no inputs): pathCost = buildScore (chain depth, rate-agnostic)
  *   - Recipe with inputs: pathCost = buildScore + sum(resourceScore of each input)
  * resourceScore(R) = min(pathCost) across all producers.
  * @param {Map<string, Object>} nodes
@@ -247,11 +252,11 @@ function computeResourceScores(nodes, edges, buildScores) {
     });
   }
 
-  // Inject virtual gathering producers (buildScore=1 matches (0+1)*(0+1)=1)
+  // Inject virtual gathering producers (no building needed = tier 0)
   for (const [resId, rate] of Object.entries(GATHERING_RATES)) {
     if (!nodes.has(resId)) continue;
     if (!producers.has(resId)) producers.set(resId, []);
-    producers.get(resId).push({ buildingId: null, inputs: [], buildScore: 1, outputAmount: rate });
+    producers.get(resId).push({ buildingId: null, inputs: [], buildScore: 0, outputAmount: rate });
   }
 
   const scores = new Map();
@@ -273,8 +278,16 @@ function computeResourceScores(nodes, edges, buildScores) {
     let minCost = Infinity;
     for (const prod of prods) {
       if (prod.inputs.length === 0) {
-        // Extraction: pathCost = buildScore / rate (mirrors productionCost = 1/rate)
-        minCost = Math.min(minCost, prod.buildScore / prod.outputAmount);
+        if (prod.buildingId === null) {
+          // Gathering (no building): tier 0, available from the start
+          minCost = 0;
+        } else {
+          // Extraction: position = buildScore (same as the building).
+          // Rate is NOT used here — X-axis represents production chain depth,
+          // not output efficiency. This keeps extraction resources next to their
+          // producer buildings regardless of how much they yield per worker.
+          minCost = Math.min(minCost, prod.buildScore);
+        }
       } else {
         // Recipe: pathCost = buildScore + sum(input resource scores)
         let pathCost = prod.buildScore;
@@ -300,8 +313,9 @@ function computeResourceScores(nodes, edges, buildScores) {
 
 /**
  * Assign nodes to alternating resource/building columns.
- * Score-aligned segments produce a building column followed by a resource column per segment.
- * Empty columns are collapsed.
+ * Uses sqrt-scaled score buckets so nodes with similar scores share columns,
+ * rather than quantile-based grouping that ignores score magnitude.
+ * Within each bucket: buildings left, resources right.
  * @param {Map<string, number>} scores
  * @param {Map<string, Object>} nodes
  * @returns {Map<string, number>}
@@ -315,26 +329,28 @@ function assignColumns(scores, nodes) {
 
   if (sorted.length === 0) return columns;
 
-  // Determine score segments using quantile breaks
-  const TARGET_SEGMENTS = 12;
-  const segSize = Math.max(1, Math.ceil(sorted.length / TARGET_SEGMENTS));
+  // Group nodes by sqrt-scaled score buckets.
+  // sqrt compresses high scores so late-game buildings don't eat all the columns,
+  // while keeping early-game tiers visually separated.
+  const maxScore = sorted[sorted.length - 1][1];
+  const TARGET_GROUPS = 12;
+  const scale = maxScore > 0.01 ? TARGET_GROUPS / Math.sqrt(maxScore) : 1;
 
-  // Assign columns: within each segment, buildings first, then resources
+  const groups = new Map();
+  for (const [id, score] of sorted) {
+    const g = Math.floor(Math.sqrt(Math.max(0, score)) * scale);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(id);
+  }
+
+  // Assign columns: each group splits into building sub-col + resource sub-col
   let col = 0;
-
-  for (let segStart = 0; segStart < sorted.length; segStart += segSize) {
-    const segEnd = Math.min(segStart + segSize, sorted.length);
-    const resIds = [];
-    const bldIds = [];
-
-    for (let i = segStart; i < segEnd; i++) {
-      const [id] = sorted[i];
-      if (nodes.get(id).type === "resource") resIds.push(id);
-      else bldIds.push(id);
-    }
+  for (const gIdx of Array.from(groups.keys()).sort((a, b) => a - b)) {
+    const members = groups.get(gIdx);
+    const resIds = members.filter(id => nodes.get(id).type === "resource");
+    const bldIds = members.filter(id => nodes.get(id).type !== "resource");
 
     // Buildings first (left), then their output resources (right)
-    // This ensures outputs flow left-to-right: building → resource it produces
     if (bldIds.length > 0) {
       for (const id of bldIds) columns.set(id, col);
       col++;
@@ -373,6 +389,8 @@ function assignBand(node, extractedResources) {
 
 /**
  * Position nodes using column/band assignment + barycenter edge-crossing minimization.
+ * Uses alternating left-to-right / right-to-left sweeps with distance-weighted
+ * neighbor influence across ALL columns (not just ±2).
  * @param {Map<string, Object>} nodes
  * @param {Map<string, number>} columns
  * @param {Map<string, number>} bands
@@ -393,40 +411,48 @@ function positionNodes(nodes, columns, bands, neighborsByNode) {
     bandMap.get(band).push(id);
   }
 
-  // Initial positioning: stack nodes per column, per band
   const positions = new Map();
   const numCols = Math.max(...Array.from(columns.values()), 0) + 1;
 
-  // Run barycenter sorting (3 passes)
-  for (let pass = 0; pass < 3; pass++) {
-    for (let col = 0; col < numCols; col++) {
+  // Initial positions (needed before first barycenter pass)
+  computePositionsFromGroups(colBandGroups, numCols, positions, nodes);
+
+  // Barycenter sorting: alternating sweep direction, distance-weighted neighbors
+  const NUM_PASSES = 6;
+  for (let pass = 0; pass < NUM_PASSES; pass++) {
+    const leftToRight = pass % 2 === 0;
+
+    for (let i = 0; i < numCols; i++) {
+      const col = leftToRight ? i : numCols - 1 - i;
       const bandMap = colBandGroups.get(col);
       if (!bandMap) continue;
 
       for (const [_band, nodeIds] of bandMap) {
         if (nodeIds.length <= 1) continue;
 
-        // Compute barycenter for each node (avg Y of connected neighbors in nearby columns)
         const barycenters = new Map();
         for (const nid of nodeIds) {
-          const neighborYs = [];
           const neighbors = neighborsByNode.get(nid) || [];
+          let weightedSum = 0;
+          let totalWeight = 0;
+
           for (const neighborId of neighbors) {
             const neighborCol = columns.get(neighborId);
-            if (neighborCol === undefined) continue;
-            // Nearby columns (within 2 — since alternating R/B means neighbors are 2 cols apart)
-            if (Math.abs(neighborCol - col) <= 2 && neighborCol !== col) {
-              const pos = positions.get(neighborId);
-              if (pos) neighborYs.push(pos.y);
-            }
+            if (neighborCol === undefined || neighborCol === col) continue;
+            const pos = positions.get(neighborId);
+            if (!pos) continue;
+
+            // Inverse-distance weighting: nearby neighbors pull harder
+            const w = 1 / Math.abs(neighborCol - col);
+            weightedSum += pos.y * w;
+            totalWeight += w;
           }
 
-          if (neighborYs.length > 0) {
-            barycenters.set(nid, neighborYs.reduce((a, b) => a + b, 0) / neighborYs.length);
+          if (totalWeight > 0) {
+            barycenters.set(nid, weightedSum / totalWeight);
           }
         }
 
-        // Sort by barycenter (nodes without barycenters keep their position)
         nodeIds.sort((a, b) => {
           const ba = barycenters.get(a);
           const bb = barycenters.get(b);
@@ -438,7 +464,6 @@ function positionNodes(nodes, columns, bands, neighborsByNode) {
       }
     }
 
-    // Recompute positions after each barycenter pass
     computePositionsFromGroups(colBandGroups, numCols, positions, nodes);
   }
 

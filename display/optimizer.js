@@ -697,6 +697,69 @@ function analyzePhase(ctx) {
   ctx._candScore = new Float64Array(CAND_MAX);
   ctx._candII = new Int32Array(CAND_MAX);
   ctx._candCount = 0;
+
+  detectSymmetryAxes(ctx);
+}
+
+/**
+ * Detect symmetry axes of the room shape.
+ * Computes how symmetric the room is across horizontal (top↔bottom) and vertical (left↔right) axes.
+ */
+function detectSymmetryAxes(ctx) {
+  const { gridW, gridH, room } = ctx;
+
+  // Find bounding box of room tiles
+  let minR = gridH, maxR = 0, minC = gridW, maxC = 0;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c]) {
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+        if (c < minC) minC = c;
+        if (c > maxC) maxC = c;
+      }
+
+  const centerR = (minR + maxR) / 2;
+  const centerC = (minC + maxC) / 2;
+
+  // Horizontal axis: mirror top↔bottom (reflect rows around centerR)
+  let hMatch = 0, hTotal = 0;
+  for (let r = minR; r <= maxR; r++)
+    for (let c = minC; c <= maxC; c++) {
+      const mirrorR = Math.round(2 * centerR - r);
+      if (mirrorR < 0 || mirrorR >= gridH) continue;
+      hTotal++;
+      if (room[r][c] === room[mirrorR][c]) hMatch++;
+    }
+
+  // Vertical axis: mirror left↔right (reflect cols around centerC)
+  let vMatch = 0, vTotal = 0;
+  for (let r = minR; r <= maxR; r++)
+    for (let c = minC; c <= maxC; c++) {
+      const mirrorC = Math.round(2 * centerC - c);
+      if (mirrorC < 0 || mirrorC >= gridW) continue;
+      vTotal++;
+      if (room[r][c] === room[r][mirrorC]) vMatch++;
+    }
+
+  // Rotational symmetry: 180° rotation around center
+  let rMatch = 0, rTotal = 0;
+  for (let r = minR; r <= maxR; r++)
+    for (let c = minC; c <= maxC; c++) {
+      const mirrorR = Math.round(2 * centerR - r);
+      const mirrorC = Math.round(2 * centerC - c);
+      if (mirrorR < 0 || mirrorR >= gridH || mirrorC < 0 || mirrorC >= gridW) continue;
+      rTotal++;
+      if (room[r][c] === room[mirrorR][mirrorC]) rMatch++;
+    }
+
+  const horizontal = hTotal > 0 ? hMatch / hTotal : 0;
+  const vertical = vTotal > 0 ? vMatch / vTotal : 0;
+  const rotational = rTotal > 0 ? rMatch / rTotal : 0;
+  const bestAxis = horizontal >= vertical ? 'horizontal' : 'vertical';
+  const bestAxisScore = Math.max(horizontal, vertical);
+
+  ctx.symmetryAxes = { centerR, centerC, horizontal, vertical, rotational, bestAxis, bestAxisScore };
 }
 
 // ── Top-K candidate helpers ──────────────────────────────
@@ -1366,6 +1429,70 @@ function scoreLayout(ctx) {
   const packingBonus = (occupied / Math.max(1, roomTileCount)) * 200;
 
   return primary * 1000 + effBonus + relBonus + packingBonus - effPenalty - relPenalty;
+}
+
+/**
+ * Symmetry tiebreaker for strategy comparison only (NOT used during SA/local search).
+ * Returns scoreLayout + small symmetry bonus (max 50 pts, vs primary × 1000).
+ * Nudges toward symmetric layouts when primary stats are equal.
+ */
+function scoreLayoutWithSymmetry(ctx) {
+  return scoreLayout(ctx) + computeSymmetryBonus(ctx);
+}
+
+/**
+ * Compute symmetry bonus for the current layout.
+ * Checks mirror (best axis) and 180° rotational symmetry, takes the best.
+ * Uses groupGrid to check if transformed tiles have the same group index (or both empty).
+ * Max 50 points. Only active when room shape is sufficiently symmetric (>= 0.7).
+ */
+function computeSymmetryBonus(ctx) {
+  const axes = ctx.symmetryAxes;
+  if (!axes) return 0;
+
+  const { gridW, gridH, room, groupGrid } = ctx;
+  const { centerR, centerC, bestAxis, bestAxisScore, rotational: rotShapeScore } = axes;
+
+  let bestBonus = 0;
+
+  // Mirror symmetry (best axis)
+  if (bestAxisScore >= 0.7) {
+    let match = 0, total = 0;
+    for (let r = 0; r < gridH; r++) {
+      for (let c = 0; c < gridW; c++) {
+        if (!room[r][c]) continue;
+        const mirrorR = bestAxis === 'horizontal' ? Math.round(2 * centerR - r) : r;
+        const mirrorC = bestAxis === 'vertical' ? Math.round(2 * centerC - c) : c;
+        if (mirrorR < 0 || mirrorR >= gridH || mirrorC < 0 || mirrorC >= gridW) continue;
+        if (!room[mirrorR][mirrorC]) continue;
+        total++;
+        if (groupGrid[r][c] === groupGrid[mirrorR][mirrorC]) match++;
+      }
+    }
+    if (total > 0) bestBonus = (match / total) * bestAxisScore * 50;
+  }
+
+  // Rotational symmetry (180°)
+  if (rotShapeScore >= 0.7) {
+    let match = 0, total = 0;
+    for (let r = 0; r < gridH; r++) {
+      for (let c = 0; c < gridW; c++) {
+        if (!room[r][c]) continue;
+        const mirrorR = Math.round(2 * centerR - r);
+        const mirrorC = Math.round(2 * centerC - c);
+        if (mirrorR < 0 || mirrorR >= gridH || mirrorC < 0 || mirrorC >= gridW) continue;
+        if (!room[mirrorR][mirrorC]) continue;
+        total++;
+        if (groupGrid[r][c] === groupGrid[mirrorR][mirrorC]) match++;
+      }
+    }
+    if (total > 0) {
+      const rotBonus = (match / total) * rotShapeScore * 50;
+      if (rotBonus > bestBonus) bestBonus = rotBonus;
+    }
+  }
+
+  return bestBonus;
 }
 
 async function localSearchPhase(ctx) {
@@ -2637,6 +2764,174 @@ async function constructivePass(ctx, options) {
 }
 
 // ══════════════════════════════════════════════════════════
+// Mirror Constructive Strategy
+// ══════════════════════════════════════════════════════════
+
+/**
+ * Mirror constructive strategy: build one half of the room, then mirror placements to the other half.
+ * @param {object} ctx
+ * @param {object} config - constructive pass config
+ * @param {'horizontal'|'vertical'} axis - which axis to mirror across
+ */
+async function mirrorConstructivePass(ctx, config, axis) {
+  const { gridW, gridH, room } = ctx;
+  const { centerR, centerC } = ctx.symmetryAxes;
+
+  // Save original roomTiles and freeBitmap
+  const origRoomTiles = ctx.roomTiles;
+  const origRoomTileSet = ctx.roomTileSet;
+
+  // Restrict roomTiles to one half (keep room[][] intact for walkability)
+  const halfTiles = [];
+  const halfTileSet = new Set();
+  for (const t of origRoomTiles) {
+    let inHalf;
+    if (axis === 'vertical') {
+      // Left half (including center column)
+      inHalf = t.c <= Math.floor(centerC);
+    } else {
+      // Top half (including center row)
+      inHalf = t.r <= Math.floor(centerR);
+    }
+    if (inHalf) {
+      halfTiles.push(t);
+      halfTileSet.add(t.r * gridW + t.c);
+    }
+  }
+
+  // Restrict freeBitmap to half
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++) {
+      if (!halfTileSet.has(r * gridW + c)) ctx.freeBitmap[r * gridW + c] = 0;
+    }
+
+  ctx.roomTiles = halfTiles;
+  ctx.roomTileSet = halfTileSet;
+
+  // Run constructive pass on the restricted half
+  await constructivePass(ctx, config);
+
+  // Restore full roomTiles and freeBitmap
+  ctx.roomTiles = origRoomTiles;
+  ctx.roomTileSet = origRoomTileSet;
+  // Rebuild freeBitmap from current state
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      ctx.freeBitmap[r * gridW + c] = (room[r][c] && ctx.occupancy[r][c] < 0) ? 1 : 0;
+
+  // Mirror placements from the built half to the other half
+  const placementsToMirror = ctx.placements.slice(ctx.lockedCount);
+  const MIRROR_OFFSETS = [[0, 0], [0, 1], [0, -1], [1, 0], [-1, 0]];
+
+  for (const p of placementsToMirror) {
+    const group = ctx.furnitureSet.groups[p.groupIdx];
+    const rots = getAllowedRotations(group);
+    const maxP = group.max ?? 100;
+    if (countGroupPlacements(ctx, p.groupIdx) >= maxP) continue;
+
+    // Compute mirror position
+    let mirrorRow, mirrorCol;
+    if (axis === 'vertical') {
+      mirrorCol = Math.round(2 * centerC - p.col);
+      mirrorRow = p.row;
+      // Adjust for item width: mirror the right edge, not just origin
+      const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+      const itemW = tiles[0]?.length ?? 1;
+      mirrorCol = Math.round(2 * centerC - (p.col + itemW - 1));
+    } else {
+      mirrorRow = Math.round(2 * centerR - p.row);
+      mirrorCol = p.col;
+      const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+      const itemH = tiles.length;
+      mirrorRow = Math.round(2 * centerR - (p.row + itemH - 1));
+    }
+
+    // Try placing at mirror position with all rotations and small offsets
+    let placed = false;
+    for (const [dr, dc] of MIRROR_OFFSETS) {
+      if (placed) break;
+      for (const rot of rots) {
+        if (placeItem(ctx, p.groupIdx, p.itemIdx, rot, mirrorRow + dr, mirrorCol + dc)) {
+          placed = true;
+          break;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Rotational constructive strategy: build one half, then rotate 180° to fill the other half.
+ * @param {object} ctx
+ * @param {object} config - constructive pass config
+ */
+async function rotationalConstructivePass(ctx, config) {
+  const { gridW, gridH, room } = ctx;
+  const { centerR, centerC } = ctx.symmetryAxes;
+
+  // Save original roomTiles and freeBitmap
+  const origRoomTiles = ctx.roomTiles;
+  const origRoomTileSet = ctx.roomTileSet;
+
+  // Restrict to top half (including center row)
+  const halfTiles = [];
+  const halfTileSet = new Set();
+  for (const t of origRoomTiles) {
+    if (t.r <= Math.floor(centerR)) {
+      halfTiles.push(t);
+      halfTileSet.add(t.r * gridW + t.c);
+    }
+  }
+
+  // Restrict freeBitmap to half
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (!halfTileSet.has(r * gridW + c)) ctx.freeBitmap[r * gridW + c] = 0;
+
+  ctx.roomTiles = halfTiles;
+  ctx.roomTileSet = halfTileSet;
+
+  // Run constructive pass on the restricted half
+  await constructivePass(ctx, config);
+
+  // Restore full roomTiles and freeBitmap
+  ctx.roomTiles = origRoomTiles;
+  ctx.roomTileSet = origRoomTileSet;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      ctx.freeBitmap[r * gridW + c] = (room[r][c] && ctx.occupancy[r][c] < 0) ? 1 : 0;
+
+  // Rotate each placement 180° around center to fill the other half
+  const placementsToRotate = ctx.placements.slice(ctx.lockedCount);
+  const MIRROR_OFFSETS = [[0, 0], [0, 1], [0, -1], [1, 0], [-1, 0]];
+
+  for (const p of placementsToRotate) {
+    const group = ctx.furnitureSet.groups[p.groupIdx];
+    const rots = getAllowedRotations(group);
+    const maxP = group.max ?? 100;
+    if (countGroupPlacements(ctx, p.groupIdx) >= maxP) continue;
+
+    // 180° rotation: mirror both axes
+    const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+    const itemH = tiles.length;
+    const itemW = tiles[0]?.length ?? 1;
+    const rotRow = Math.round(2 * centerR - (p.row + itemH - 1));
+    const rotCol = Math.round(2 * centerC - (p.col + itemW - 1));
+
+    let placed = false;
+    for (const [dr, dc] of MIRROR_OFFSETS) {
+      if (placed) break;
+      for (const rot of rots) {
+        if (placeItem(ctx, p.groupIdx, p.itemIdx, rot, rotRow + dr, rotCol + dc)) {
+          placed = true;
+          break;
+        }
+      }
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════
 // Main entry point
 // ══════════════════════════════════════════════════════════
 
@@ -2753,10 +3048,31 @@ export async function runOptimizer(input) {
     );
   }
 
-  // Compute total strategies for progress (1 strip + constructive + deferred)
+  // Mirror constructive configs (only when room shape is sufficiently symmetric)
+  const mirrorConfigs = [];
+  if (ctx.symmetryAxes.bestAxisScore >= 0.5 && !isLargeRoom) {
+    const ba = ctx.symmetryAxes.bestAxis;
+    mirrorConfigs.push(
+      { constructiveConfig: { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false }, axis: 'vertical' },
+      { constructiveConfig: { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false }, axis: 'horizontal' },
+      { constructiveConfig: { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true }, axis: ba },
+      { constructiveConfig: { skipInterval: 0, heroRotate: 0, reverseScan: true,  tryAllHeroSizes: false }, axis: ba },
+    );
+  }
+
+  // Rotational (180°) constructive configs
+  const rotationalConfigs = [];
+  if (ctx.symmetryAxes.rotational >= 0.5 && !isLargeRoom) {
+    rotationalConfigs.push(
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false },
+      { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true },
+    );
+  }
+
+  // Compute total strategies for progress (1 strip + constructive + mirror + rotational + deferred)
   const hasSecondary = (ctx.empIdx >= 0 && ctx.effIdx >= 0) || ctx.relativeIndices.length > 0;
   const deferredCount = (hasSecondary && !isLargeRoom) ? 8 : 0;
-  const totalStrategies = 1 + constructiveConfigs.length + deferredCount;
+  const totalStrategies = 1 + constructiveConfigs.length + mirrorConfigs.length + rotationalConfigs.length + deferredCount;
   let strategiesDone = 1; // strip already done
   // Strategies span 0.02–0.70 of progress
   const STRAT_START = 0.02, STRAT_END = 0.70;
@@ -2776,6 +3092,44 @@ export async function runOptimizer(input) {
     strategiesDone++;
   }
   traceEnd('strategies:constructive');
+
+  // Mirror constructive strategies
+  if (mirrorConfigs.length > 0) {
+    traceStart('strategies:mirror');
+    for (const mc of mirrorConfigs) {
+      const p = STRAT_START + (STRAT_END - STRAT_START) * (strategiesDone / totalStrategies);
+      reportProgress('Searching', `Mirror ${strategiesDone + 1} / ${totalStrategies}`, p);
+      traceStart('strategy:mirror');
+      restoreLightSnapshot(ctx, initialSnapshot);
+      const result = await runStrategy(ctx, (c) => mirrorConstructivePass(c, mc.constructiveConfig, mc.axis));
+      if (result.score > bestScore) {
+        bestScore = result.score;
+        bestSnapshot = result.snapshot;
+      }
+      traceEnd('strategy:mirror');
+      strategiesDone++;
+    }
+    traceEnd('strategies:mirror');
+  }
+
+  // Rotational (180°) constructive strategies
+  if (rotationalConfigs.length > 0) {
+    traceStart('strategies:rotational');
+    for (const config of rotationalConfigs) {
+      const p = STRAT_START + (STRAT_END - STRAT_START) * (strategiesDone / totalStrategies);
+      reportProgress('Searching', `Rotational ${strategiesDone + 1} / ${totalStrategies}`, p);
+      traceStart('strategy:rotational');
+      restoreLightSnapshot(ctx, initialSnapshot);
+      const result = await runStrategy(ctx, (c) => rotationalConstructivePass(c, config));
+      if (result.score > bestScore) {
+        bestScore = result.score;
+        bestSnapshot = result.snapshot;
+      }
+      traceEnd('strategy:rotational');
+      strategiesDone++;
+    }
+    traceEnd('strategies:rotational');
+  }
 
   // Track best non-deferred result for fallback comparison
   let bestCoreSnapshot = bestSnapshot;
@@ -2827,7 +3181,7 @@ export async function runOptimizer(input) {
       restoreSnapshot(ctx, snapshot);
       doorPhase(ctx);
     }
-    return { score: scoreLayout(ctx), snapshot: takeSnapshot(ctx) };
+    return { score: scoreLayoutWithSymmetry(ctx), snapshot: takeSnapshot(ctx) };
   }
 
   // Try polishing with multiple RNG seeds and keep the best result.

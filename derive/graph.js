@@ -165,6 +165,6 @@ export function buildGraph() {
 // Only raw/natural resources belong here — never manufactured goods.
 // Used by layout.js as virtual producers to break construction-cost cycles.
 export const GATHERING_RATES = {
-  stone: 0.5,       // surface stone
-  wood: 0.5,        // forest timber
+  stone: 0.5, // surface stone
+  wood: 0.5, // forest timber
 };

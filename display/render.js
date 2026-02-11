@@ -1608,8 +1608,8 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
         sprite.alpha = 1.0;
         sprite.eventMode = "none";
         if (d.type === "resource") {
-          // Centred within the concentric detail ring
-          sprite.position.set(-12, -13);
+          // Icon sits in the upper half; label goes below it inside the disc
+          sprite.position.set(-12, -19);
         } else {
           sprite.position.set(-BW / 2 + 10, -12);
         }
@@ -1623,11 +1623,12 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       text: d.name,
       style: {
         fontFamily: '"DM Sans", "Segoe UI", system-ui, sans-serif',
-        fontSize: isRes ? 11.5 : 12,
+        fontSize: isRes ? 10 : 12,
         fontWeight: isRes ? "700" : "600",
         fill: isRes ? "#dce0e8" : "#ccd2da",
         letterSpacing: isRes ? 0.3 : 0,
         align: "center",
+        ...(isRes ? { wordWrap: true, wordWrapWidth: 54 } : {}),
         stroke: { color: "#060a10", width: isRes ? 4 : 3, join: "round" },
       },
     });
@@ -1637,8 +1638,8 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       nameText.anchor.set(0.5, 0.5);
       nameText.position.set(14, 0);
     } else if (d.type === "resource" && d.icon) {
-      nameText.anchor.set(0.5, 0);
-      nameText.position.set(0, RESOURCE_R + 6);
+      nameText.anchor.set(0.5, 0.5);
+      nameText.position.set(0, 14);
     } else {
       nameText.anchor.set(0.5, 0.5);
       nameText.position.set(0, 0);
@@ -1663,7 +1664,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
         sublabel.resolution = window.devicePixelRatio || 1;
         sublabel.anchor.set(0.5, 0);
         sublabel.eventMode = "none";
-        sublabel.position.set(0, d.icon ? RESOURCE_R + 20 : 14);
+        sublabel.position.set(0, d.icon ? RESOURCE_R + 4 : 14);
         sublabel.alpha = 0.8;
         nodeContainer.addChild(sublabel);
       } else if (isFrontier) {
@@ -1680,7 +1681,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
         sublabel.resolution = window.devicePixelRatio || 1;
         sublabel.anchor.set(0.5, 0);
         sublabel.eventMode = "none";
-        sublabel.position.set(0, d.icon ? RESOURCE_R + 20 : 14);
+        sublabel.position.set(0, d.icon ? RESOURCE_R + 4 : 14);
         sublabel.alpha = 0.6;
         nodeContainer.addChild(sublabel);
       } else if (isWhatIf) {
@@ -1697,7 +1698,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
         sublabel.resolution = window.devicePixelRatio || 1;
         sublabel.anchor.set(0.5, 0);
         sublabel.eventMode = "none";
-        sublabel.position.set(0, d.icon ? RESOURCE_R + 20 : 14);
+        sublabel.position.set(0, d.icon ? RESOURCE_R + 4 : 14);
         sublabel.alpha = 0.85;
         nodeContainer.addChild(sublabel);
       }
