@@ -922,7 +922,7 @@ function getMirrorRotation(rot) {
  * @param {boolean} horizontal - true = strips run horizontally, false = vertical
  * @param {object} rect - bounding rectangle {minR, minC, maxR, maxC}
  */
-function fillWithStrips(ctx, strip, horizontal, rect) {
+function fillWithStrips(ctx, strip, horizontal, rect, skipSet) {
   const { minR, minC, maxR, maxC } = rect;
   const group = ctx.furnitureSet.groups[strip.groupIdx];
   const rots = getAllowedRotations(group);
@@ -942,6 +942,7 @@ function fillWithStrips(ctx, strip, horizontal, rect) {
     if (horizontal2) {
       let c = col;
       while (c <= maxC) {
+        if (skipSet && skipSet.has(c)) { c++; continue; }
         const maxP = group.max ?? 100;
         if (countGroupPlacements(ctx, strip.groupIdx) >= maxP) return;
         let placed = false;
@@ -956,6 +957,7 @@ function fillWithStrips(ctx, strip, horizontal, rect) {
     } else {
       let r = row;
       while (r <= maxR) {
+        if (skipSet && skipSet.has(r)) { r++; continue; }
         const maxP = group.max ?? 100;
         if (countGroupPlacements(ctx, strip.groupIdx) >= maxP) return;
         let placed = false;
@@ -1067,6 +1069,29 @@ async function stripFillPhase(ctx) {
       for (const horiz of [true, false]) {
         restoreLightSnapshot(ctx, initialSnap);
         fillWithStrips(ctx, altStrip, horiz, rect);
+        stats = getStats(ctx);
+        primaryVal = stats[ctx.primaryStatIdx] ?? 0;
+        if (primaryVal > bestPrimaryVal) {
+          bestPrimaryVal = primaryVal;
+          bestSnapshot = takeLightSnapshot(ctx);
+        }
+      }
+    }
+
+    // Cross-corridor variants: skip columns/rows at intervals to create perpendicular walkways
+    for (const horiz2 of [true, false]) {
+      const crossDim = horiz2 ? _rectW : _rectH;
+      if (crossDim < 12) continue;
+      for (const interval of [Math.floor(crossDim / 3), Math.floor(crossDim / 2)]) {
+        if (interval < 5) continue;
+        const skip = new Set();
+        if (horiz2) {
+          for (let c = rect.minC + interval; c <= rect.maxC; c += interval) skip.add(c);
+        } else {
+          for (let r = rect.minR + interval; r <= rect.maxR; r += interval) skip.add(r);
+        }
+        restoreLightSnapshot(ctx, initialSnap);
+        fillWithStrips(ctx, strip, horiz2, rect, skip);
         stats = getStats(ctx);
         primaryVal = stats[ctx.primaryStatIdx] ?? 0;
         if (primaryVal > bestPrimaryVal) {
@@ -2089,7 +2114,17 @@ function canEraseTile(ctx, r, c) {
 
 function doorPhase(ctx) {
   if (!ctx.furnitureSet.mustBeIndoors) return;
+  // Preserve user-placed doors (validate they're still adjacent to room after trimPhase)
   ctx.doors = new Set();
+  for (const key of ctx.userDoors) {
+    const [r, c] = key.split(",").map(Number);
+    let hasAdj = false;
+    for (const [dr, dc] of DIRS) {
+      const nr = r + dr, nc = c + dc;
+      if (nr >= 0 && nr < ctx.gridH && nc >= 0 && nc < ctx.gridW && ctx.room[nr][nc]) { hasAdj = true; break; }
+    }
+    if (hasAdj) ctx.doors.add(key);
+  }
   const outside = findOutsideTiles(ctx);
 
   // Collect door candidates: valid geometry + at least one adjacent room tile
@@ -2176,13 +2211,15 @@ function doorPhase(ctx) {
     if (candidates.length === 0) break;
 
     const target = ctx.doors.size === 0 ? "storage" : "work";
-    let bestIdx = -1, bestAvg = Infinity;
+    let bestIdx = -1, bestScore = -Infinity;
     for (let i = 0; i < candidates.length; i++) {
       const cand = candidates[i];
       ctx.doors.add(`${cand.r},${cand.c}`);
       const avg = computeAvgWalkDistance(ctx, target);
+      const maxW = computeMaxWalkDistance(ctx);
       ctx.doors.delete(`${cand.r},${cand.c}`);
-      if (avg < bestAvg) { bestAvg = avg; bestIdx = i; }
+      const score = -(avg + maxW * 0.3);
+      if (score > bestScore) { bestScore = score; bestIdx = i; }
     }
     if (bestIdx < 0) {
       if (ctx.doors.size === 0) bestIdx = 0;
@@ -2191,6 +2228,10 @@ function doorPhase(ctx) {
     const best = candidates[bestIdx];
     ctx.doors.add(`${best.r},${best.c}`);
     candidates.splice(bestIdx, 1);
+
+    // Continue adding doors if max walk distance is still high
+    const maxWalkThreshold = Math.max(12, Math.sqrt(ctx.roomTiles.length) * 0.8);
+    if (computeMaxWalkDistance(ctx) <= maxWalkThreshold) break;
   }
 
   // Ensure each door has at least one walkable adjacent room tile.
@@ -2282,6 +2323,40 @@ function computeAvgWalkDistance(ctx, target) {
   }
   if (count === 0) return Infinity;
   return totalDist / count;
+}
+
+function computeMaxWalkDistance(ctx) {
+  const { gridW, gridH, room, doors } = ctx;
+  if (doors.size === 0) return Infinity;
+  const dist = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
+  const q = ctx.bfsQueue;
+  q.reset();
+  for (const key of doors) {
+    const [dr, dc] = key.split(",").map(Number);
+    for (const [ddr, ddc] of DIRS) {
+      const nr = dr + ddr, nc = dc + ddc;
+      if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
+          && room[nr][nc] && ctx.blockerCount[nr][nc] === 0 && dist[nr][nc] < 0) {
+        dist[nr][nc] = 1;
+        q.push(nr, nc);
+      }
+    }
+  }
+  while (q.length > 0) {
+    const [cr, cc] = q.shift();
+    for (const [dr, dc] of DIRS) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      if (dist[nr][nc] >= 0 || !room[nr][nc] || ctx.blockerCount[nr][nc] > 0) continue;
+      dist[nr][nc] = dist[cr][cc] + 1;
+      q.push(nr, nc);
+    }
+  }
+  let maxDist = 0;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c] && ctx.blockerCount[r][c] === 0 && dist[r][c] > maxDist) maxDist = dist[r][c];
+  return maxDist === 0 ? Infinity : maxDist;
 }
 
 function validateFinal(ctx) {
@@ -2840,6 +2915,7 @@ function createContext(input) {
   ctx.roomTileSet = new Set();
   ctx.unstableTileCount = 0;
   ctx.reservedTiles = new Set();
+  ctx.userDoors = new Set(clonedDoors);
 
   return ctx;
 }
