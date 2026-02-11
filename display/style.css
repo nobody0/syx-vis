@@ -4,10 +4,10 @@
 /* ── Custom Properties ──────────────────────────────── */
 
 :root {
-  /* Fonts — distinctive serif display + clean grotesque body */
-  --font-display: "Crimson Pro", "Georgia", serif;
-  --font-body: "Outfit", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "Consolas", monospace;
+  /* Fonts — system stack (no external font loading) */
+  --font-display: "Georgia", serif;
+  --font-body: "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Consolas", monospace;
 
   /* Deep, warm-cool layered background */
   --bg-deep: #0c1014;
