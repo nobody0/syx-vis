@@ -672,6 +672,21 @@ function analyzePhase(ctx) {
   // Build groupIdx → gInfo lookup map for O(1) access
   ctx.groupInfoMap = new Map();
   for (const gi of ctx.groupInfo) ctx.groupInfoMap.set(gi.groupIdx, gi);
+
+  // Pre-compute max item dimension (rows or cols) across all groups/rotations
+  let maxItemDim = 0;
+  for (let gi = 0; gi < fs.groups.length; gi++) {
+    const group = fs.groups[gi];
+    const rots = getAllowedRotations(group);
+    for (let ii = 0; ii < group.items.length; ii++)
+      for (const rot of rots) {
+        const tiles = getCachedTiles(ctx, gi, ii, rot);
+        if (tiles.length > maxItemDim) maxItemDim = tiles.length;
+        for (const row of tiles)
+          if ((row?.length ?? 0) > maxItemDim) maxItemDim = row.length;
+      }
+  }
+  ctx.maxItemDim = maxItemDim;
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1771,6 +1786,24 @@ async function localSearchPhase(ctx) {
         }
         rebuildGroupCounts(ctx);
 
+        // Compute bounding box of freed tiles for localized scanning
+        let fMinR = ctx.gridH, fMaxR = 0, fMinC = ctx.gridW, fMaxC = 0;
+        for (const rem of removedInfo) {
+          const remTiles = getCachedTiles(ctx, rem.groupIdx, rem.itemIdx, rem.rotation);
+          for (let r = 0; r < remTiles.length; r++)
+            for (let c = 0; c < (remTiles[r]?.length ?? 0); c++) {
+              if (remTiles[r][c] === null) continue;
+              const gr = rem.row + r, gc = rem.col + c;
+              if (gr < fMinR) fMinR = gr; if (gr > fMaxR) fMaxR = gr;
+              if (gc < fMinC) fMinC = gc; if (gc > fMaxC) fMaxC = gc;
+            }
+        }
+        const margin = ctx.maxItemDim;
+        const bMinR = Math.max(0, fMinR - margin);
+        const bMaxR = Math.min(ctx.gridH - 1, fMaxR + margin);
+        const bMinC = Math.max(0, fMinC - margin);
+        const bMaxC = Math.min(ctx.gridW - 1, fMaxC + margin);
+
         // Reinsert — try different item sizes
         for (const rem of removedInfo) {
           const gInfo = ctx.groupInfoMap.get(rem.groupIdx);
@@ -1794,14 +1827,22 @@ async function localSearchPhase(ctx) {
             }
           }
           if (!placed2) {
+            // Exhaustive reinsert — localized to wider bbox around freed area
+            const reinsMargin = ctx.maxItemDim * 2;
+            const rMinR = Math.max(0, fMinR - reinsMargin);
+            const rMaxR = Math.min(ctx.gridH - 1, fMaxR + reinsMargin);
+            const rMinC = Math.max(0, fMinC - reinsMargin);
+            const rMaxC = Math.min(ctx.gridW - 1, fMaxC + reinsMargin);
             let bestPos3 = null, bestScore3 = -Infinity, bestII3 = -1;
             for (const ii of itemCandidates) {
               for (const rot of rots) {
-                for (const { r, c } of ctx.roomTiles) {
-                  if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-                  if (!canPlaceFast(ctx,rem.groupIdx, ii, rot, r, c, undefined)) continue;
-                  const s = scorePlacementPosition(ctx, rem.groupIdx, ii, rot, r, c);
-                  if (s > bestScore3) { bestScore3 = s; bestPos3 = { rot, row: r, col: c }; bestII3 = ii; }
+                for (let r = rMinR; r <= rMaxR; r++) {
+                  for (let c = rMinC; c <= rMaxC; c++) {
+                    if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+                    if (!canPlaceFast(ctx,rem.groupIdx, ii, rot, r, c, undefined)) continue;
+                    const s = scorePlacementPosition(ctx, rem.groupIdx, ii, rot, r, c);
+                    if (s > bestScore3) { bestScore3 = s; bestPos3 = { rot, row: r, col: c }; bestII3 = ii; }
+                  }
                 }
               }
             }
@@ -1809,25 +1850,31 @@ async function localSearchPhase(ctx) {
           }
         }
 
-        // Gap fill freed space
+        // Gap fill freed space (capped + localized)
+        let gapFilled = 0;
+        const GAP_FILL_MAX = 4;
         for (const gInfo2 of ctx.groupInfo) {
+          if (gapFilled >= GAP_FILL_MAX) break;
           if (!gInfo2.hasPrimary && gInfo2.priority > 1) continue;
           const gi2 = gInfo2.groupIdx;
           const group2 = fs.groups[gi2];
           const rots2 = getAllowedRotations(group2);
           const maxP2 = group2.max ?? 100;
           for (const ii of [...gInfo2.heroItems, ...gInfo2.fillerItems]) {
+            if (gapFilled >= GAP_FILL_MAX) break;
             if (countGroupPlacements(ctx, gi2) >= maxP2) break;
             let bestPos = null, bestScore = -Infinity;
             for (const rot of rots2) {
-              for (const { r, c } of ctx.roomTiles) {
-                if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
-                if (!canPlaceFast(ctx,gi2, ii, rot, r, c, undefined)) continue;
-                const s = scorePlacementPosition(ctx, gi2, ii, rot, r, c);
-                if (s > bestScore) { bestScore = s; bestPos = { rot, row: r, col: c }; }
+              for (let r = bMinR; r <= bMaxR; r++) {
+                for (let c = bMinC; c <= bMaxC; c++) {
+                  if (!ctx.freeBitmap[r * ctx.gridW + c]) continue;
+                  if (!canPlaceFast(ctx,gi2, ii, rot, r, c, undefined)) continue;
+                  const s = scorePlacementPosition(ctx, gi2, ii, rot, r, c);
+                  if (s > bestScore) { bestScore = s; bestPos = { rot, row: r, col: c }; }
+                }
               }
             }
-            if (bestPos) placeItem(ctx, gi2, ii, bestPos.rot, bestPos.row, bestPos.col);
+            if (bestPos && placeItem(ctx, gi2, ii, bestPos.rot, bestPos.row, bestPos.col)) gapFilled++;
           }
         }
         if (ctx.empIdx >= 0 && ctx.effIdx >= 0) placeEfficiencyItems(ctx);

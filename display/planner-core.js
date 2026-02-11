@@ -290,6 +290,7 @@ export function setOccupancy(ctx, pi) {
   const fs = ctx.furnitureSet;
   const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
   let overlap = false;
+  let addedBlockers = false;
   for (let r = 0; r < tiles.length; r++) {
     for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
       const tileKey = tiles[r][c];
@@ -303,13 +304,13 @@ export function setOccupancy(ctx, pi) {
       ctx.groupGrid[gr][gc] = p.groupIdx;
       if (ctx.freeBitmap) ctx.freeBitmap[gr * ctx.gridW + gc] = 0;
       const tt = fs.tileTypes[tileKey];
-      if (tt && AVAIL_IMPASSABLE.has(tt.availability)) ctx.blockerCount[gr][gc]++;
+      if (tt && AVAIL_IMPASSABLE.has(tt.availability)) { ctx.blockerCount[gr][gc]++; addedBlockers = true; }
       if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 1;
     }
   }
   ctx.statsDirty = true;
   ctx.mustReachDirty = true;
-  ctx._walkabilityValid = false;
+  if (addedBlockers) ctx._walkabilityValid = false;
   return !overlap;
 }
 
@@ -318,6 +319,7 @@ export function clearOccupancy(ctx, pi) {
   const p = ctx.placements[pi];
   const fs = ctx.furnitureSet;
   const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+  let removedBlockers = false;
   for (let r = 0; r < tiles.length; r++) {
     for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
       const tileKey = tiles[r][c];
@@ -330,7 +332,7 @@ export function clearOccupancy(ctx, pi) {
           ctx.occupiedCount--;
           if (ctx.freeBitmap && ctx.room[gr][gc]) ctx.freeBitmap[gr * ctx.gridW + gc] = 1;
           const tt = fs.tileTypes[tileKey];
-          if (tt && AVAIL_IMPASSABLE.has(tt.availability)) ctx.blockerCount[gr][gc]--;
+          if (tt && AVAIL_IMPASSABLE.has(tt.availability)) { ctx.blockerCount[gr][gc]--; removedBlockers = true; }
           if (tt?.mustBeReachable) ctx.mustReachGrid[gr * ctx.gridW + gc] = 0;
         }
       }
@@ -338,7 +340,7 @@ export function clearOccupancy(ctx, pi) {
   }
   ctx.statsDirty = true;
   ctx.mustReachDirty = true;
-  ctx._walkabilityValid = false;
+  if (removedBlockers) ctx._walkabilityValid = false;
 }
 
 // ── Tile lookup helpers ──────────────────────────────────
@@ -879,6 +881,7 @@ export function canPlaceWithReason(ctx, groupIdx, itemIdx, rotation, row, col) {
 
 /** Full walkability check: connectivity + mustBeReachable + piece reachability. Returns boolean. */
 export function checkWalkability(ctx) {
+  if (ctx._walkabilityValid) return true;
   const { furnitureSet: fs, gridW, gridH, room, placements, blockerCount } = ctx;
 
   let mustReach;
