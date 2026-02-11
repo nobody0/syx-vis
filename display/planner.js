@@ -13,7 +13,7 @@ import {
   DIRS, getRotatedTiles, getAllowedRotations,
   createRoomContext, buildOccupancyGrid, setOccupancy,
   getPlacementAt as getPlacementAtCore,
-  canPlaceWithReason, checkWalkability as checkWalkabilityCore,
+  canPlaceWithReason, findUnreachableMRTiles,
   computeStats as computeStatsCore,
   computeWalls as computeWallsCore,
   computeIsolation as computeIsolationCore,
@@ -537,11 +537,8 @@ function countItemPlacements(groupIdx, itemIdx) {
 
 function checkWalkability() {
   if (!state.ctx || !state.furnitureSet) return { ok: true, unreachable: [], disconnected: 0 };
-  // Rebuild occupancy to keep ctx in sync with current state
   buildOccupancyGrid(state.ctx);
-  const ok = checkWalkabilityCore(state.ctx);
-  // For UI reporting we just need ok + empty arrays (detailed reporting was rarely used)
-  return { ok, unreachable: [], disconnected: 0 };
+  return findUnreachableMRTiles(state.ctx);
 }
 
 // ── Hover / drag state ───────────────────────────────────

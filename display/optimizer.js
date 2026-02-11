@@ -339,9 +339,17 @@ function mergeAdjacentPlacements(ctx) {
               if (ctx.groupCounts[gi] - 1 < group.min) continue;
 
               // Merge: replace piA with merged item, remove piB (piA < piB always)
+              const savedA = { ...pA }, savedB = { ...pB }, savedBIdx = piB;
               ctx.placements[piA] = { groupIdx: gi, itemIdx: ii, rotation: rot, row: minR, col: minC };
               ctx.placements.splice(piB, 1);
               rebuildOccupancyInPlace(ctx);
+              if (!checkWalkability(ctx)) {
+                // Merge broke MR walkability — undo
+                ctx.placements[piA] = savedA;
+                ctx.placements.splice(savedBIdx, 0, savedB);
+                rebuildOccupancyInPlace(ctx);
+                continue;
+              }
               rebuildGroupCounts(ctx);
               merged = true;
               break outer;
@@ -616,6 +624,7 @@ async function createSupportPillars(ctx) {
         if (tr < 0 || tr >= ctx.gridH || tc < 0 || tc >= ctx.gridW) continue;
         if (!ctx.room[tr][tc] || ctx.occupancy[tr][tc] >= 0) continue;
         ctx.room[tr][tc] = false;
+        ctx._walkabilityValid = false;
         const newUnstable = countUnstableTiles(ctx);
         const connected = checkRoomConnectivity(ctx);
         const walkable = connected && checkWalkability(ctx);
@@ -2504,6 +2513,7 @@ function canEraseTile(ctx, r, c) {
   if (ctx.reservedTiles.has(r * ctx.gridW + c)) return false;
   if (ctx.roomTiles.length <= 1) return false;
   ctx.room[r][c] = false;
+  ctx._walkabilityValid = false;
   const connected = checkRoomConnectivity(ctx);
   const walkable = connected && checkWalkability(ctx);
   ctx.room[r][c] = true;

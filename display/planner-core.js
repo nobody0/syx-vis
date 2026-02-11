@@ -1004,6 +1004,63 @@ export function checkWalkability(ctx) {
   return walkable;
 }
 
+/** Diagnostic walkability check returning unreachable MR tiles. Read-only (no cache mutation). */
+export function findUnreachableMRTiles(ctx) {
+  const { furnitureSet: fs, gridW, gridH, room, placements, blockerCount } = ctx;
+
+  // BFS over walkable (non-blocked room) tiles
+  const v = freshVisited(ctx);
+  const q = ctx.bfsQueue;
+  q.reset();
+  let totalOpen = 0, seeded = false;
+  for (let r = 0; r < gridH; r++)
+    for (let c = 0; c < gridW; c++)
+      if (room[r][c] && blockerCount[r][c] === 0) {
+        totalOpen++;
+        if (!seeded) { q.push(r, c); visitedSet(v, r, c); seeded = true; }
+      }
+
+  let reached = seeded ? 1 : 0;
+  while (q.length > 0) {
+    const [cr, cc] = q.shift();
+    for (const [dr, dc] of DIRS) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      if (visitedHas(v, nr, nc) || !room[nr][nc] || blockerCount[nr][nc] > 0) continue;
+      visitedSet(v, nr, nc);
+      reached++;
+      q.push(nr, nc);
+    }
+  }
+
+  const disconnected = totalOpen - reached;
+
+  // Collect mustBeReachable tiles not adjacent to any BFS-visited tile
+  const unreachable = [];
+  for (const p of placements) {
+    const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+    for (let r = 0; r < tiles.length; r++)
+      for (let c = 0; c < (tiles[r]?.length ?? 0); c++) {
+        const tileKey = tiles[r][c];
+        if (tileKey === null) continue;
+        const gr = p.row + r, gc = p.col + c;
+        if (gr < 0 || gr >= gridH || gc < 0 || gc >= gridW) continue;
+        const tt = fs.tileTypes[tileKey];
+        if (!tt?.mustBeReachable) continue;
+        let ok = false;
+        for (const [dr, dc] of DIRS) {
+          const nr = gr + dr, nc = gc + dc;
+          if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW && visitedHas(v, nr, nc)) {
+            ok = true; break;
+          }
+        }
+        if (!ok) unreachable.push({ row: gr, col: gc });
+      }
+  }
+
+  return { ok: unreachable.length === 0 && disconnected === 0, unreachable, disconnected };
+}
+
 // ── Room connectivity ────────────────────────────────────
 
 /** Check that all room tiles form a single connected component. */
