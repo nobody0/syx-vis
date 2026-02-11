@@ -187,6 +187,123 @@ export const EDGE_ALPHAS = {
 };
 
 /**
+ * Assign edge connection ports along node boundaries.
+ * Groups edges by node + side (left/right), sorts by the Y of the node at the
+ * other end, then distributes connection points evenly along the node boundary.
+ *
+ * @param {Array<{v: string, w: string, fromPos: {x: number, y: number}, toPos: {x: number, y: number}, direction: string}>} edgeData
+ * @param {Map<string, Object>} nodes - node map (need .type)
+ * @param {number} buildingW - building width
+ * @param {number} buildingH - building height
+ * @param {number} resourceR - resource radius
+ * @returns {Array<{fromX: number, fromY: number, toX: number, toY: number}>} adjusted endpoints per edge (same indices as edgeData)
+ */
+export function assignEdgePorts(edgeData, nodes, buildingW, buildingH, resourceR) {
+  const hw = buildingW / 2;
+  const MIN_SPACING = 3;
+  const MARGIN = 6; // px from corners of building rects
+  const ARC_SPREAD = Math.PI / 4; // ±45° from horizontal for resource ports
+
+  // Result array — default to center-to-center
+  const result = edgeData.map(d => ({
+    fromX: d.fromPos ? d.fromPos.x : 0,
+    fromY: d.fromPos ? d.fromPos.y : 0,
+    toX: d.toPos ? d.toPos.x : 0,
+    toY: d.toPos ? d.toPos.y : 0,
+  }));
+
+  // Group edges by (nodeId, side) where side = "left" or "right"
+  // Each edge contributes two entries: one for its "from" node and one for its "to" node
+  // key = "nodeId:side"
+  const portGroups = new Map(); // key → [{edgeIdx, end: "from"|"to", otherY}]
+
+  for (let i = 0; i < edgeData.length; i++) {
+    const d = edgeData[i];
+    if (!d.fromPos || !d.toPos) continue;
+
+    const dx = d.toPos.x - d.fromPos.x;
+    // Determine side based on relative position
+    // For the "from" node: edge exits toward "to", so if dx > 0 → right side, else left
+    const fromSide = dx >= 0 ? "right" : "left";
+    const toSide = dx >= 0 ? "left" : "right";
+
+    const fromKey = `${d.v}:${fromSide}`;
+    const toKey = `${d.w}:${toSide}`;
+
+    if (!portGroups.has(fromKey)) portGroups.set(fromKey, []);
+    portGroups.get(fromKey).push({ edgeIdx: i, end: "from", otherY: d.toPos.y, otherX: d.toPos.x });
+
+    if (!portGroups.has(toKey)) portGroups.set(toKey, []);
+    portGroups.get(toKey).push({ edgeIdx: i, end: "to", otherY: d.fromPos.y, otherX: d.fromPos.x });
+  }
+
+  // For each port group, sort by otherY and distribute ports
+  for (const [key, group] of portGroups) {
+    if (group.length === 0) continue;
+    const [nodeId, side] = key.split(":");
+    const node = nodes.get(nodeId);
+    if (!node) continue;
+
+    // Sort by Y position of the other end (stable edge ordering)
+    group.sort((a, b) => a.otherY - b.otherY || a.otherX - b.otherX);
+
+    const edgeIdx0 = group[0].edgeIdx;
+    const d0 = edgeData[edgeIdx0];
+    const end0 = group[0].end;
+    const nodePos = end0 === "from" ? d0.fromPos : d0.toPos;
+    if (!nodePos) continue;
+
+    if (node.type === "resource") {
+      // Distribute along an arc: ±ARC_SPREAD from horizontal
+      const centerAngle = side === "right" ? 0 : Math.PI;
+      const arcLen = ARC_SPREAD * 2; // total arc span
+      const n = group.length;
+
+      for (let j = 0; j < n; j++) {
+        // Evenly space within the arc
+        const t = n === 1 ? 0.5 : j / (n - 1);
+        const angle = centerAngle - ARC_SPREAD + t * arcLen;
+        const px = nodePos.x + Math.cos(angle) * resourceR;
+        const py = nodePos.y + Math.sin(angle) * resourceR;
+
+        const entry = group[j];
+        if (entry.end === "from") {
+          result[entry.edgeIdx].fromX = px;
+          result[entry.edgeIdx].fromY = py;
+        } else {
+          result[entry.edgeIdx].toX = px;
+          result[entry.edgeIdx].toY = py;
+        }
+      }
+    } else {
+      // Building: distribute along left or right edge
+      const usableHeight = buildingH - 2 * MARGIN;
+      const n = group.length;
+      const spacing = Math.max(MIN_SPACING, usableHeight / Math.max(n - 1, 1));
+      const totalSpan = Math.min(spacing * (n - 1), usableHeight);
+      const startOffset = -totalSpan / 2;
+
+      const edgeX = side === "right" ? nodePos.x + hw : nodePos.x - hw;
+
+      for (let j = 0; j < n; j++) {
+        const py = nodePos.y + startOffset + j * (n === 1 ? 0 : totalSpan / (n - 1));
+
+        const entry = group[j];
+        if (entry.end === "from") {
+          result[entry.edgeIdx].fromX = edgeX;
+          result[entry.edgeIdx].fromY = py;
+        } else {
+          result[entry.edgeIdx].toX = edgeX;
+          result[entry.edgeIdx].toY = py;
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * Draw an arrowhead at the end of a curve.
  * Narrower kite shape for a sleeker look.
  * @param {import('pixi.js').Graphics} g
@@ -220,3 +337,4 @@ export function drawArrowhead(g, points, color, alpha, size = 7) {
   g.closePath();
   g.fill({ color, alpha });
 }
+

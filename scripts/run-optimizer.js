@@ -49,10 +49,11 @@ function decodeSaveString(input) {
 const args = process.argv.slice(2);
 const decode = args.includes("--decode");
 const trace = args.includes("--trace");
+const walk = args.includes("--walk");
 const input = args.find(a => !a.startsWith("--"));
 
 if (!input) {
-  console.error("Usage: node scripts/run-optimizer.js <save-string-or-URL> [--decode] [--trace]");
+  console.error("Usage: node scripts/run-optimizer.js <save-string-or-URL> [--decode] [--trace] [--walk]");
   process.exit(1);
 }
 
@@ -111,6 +112,13 @@ const saveString = toBase64url(versioned);
 console.log(saveString);
 
 console.error(`Result: ${result.placements.length} placements, ${result.room.flat().filter(Boolean).length} room tiles (${elapsed}s)`);
+
+// Print walk distance metrics
+if (walk || decode) {
+  const avgW = result.walkAvg === Infinity ? "N/A" : result.walkAvg.toFixed(1);
+  const maxW = result.walkMax === Infinity ? "N/A" : String(result.walkMax);
+  console.error(`Walk distance: avg=${avgW}, max=${maxW}`);
+}
 
 // Print trace summary
 if (result.trace) {

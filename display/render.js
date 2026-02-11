@@ -1,11 +1,11 @@
 // PixiJS v8 WebGL rendering for the bipartite production chain graph
 import { Application, Container, Graphics, Text, Sprite, Assets } from "pixi.js";
 import { buildGraph } from "../derive/graph.js";
-import { computeLayout, bezierMidpoint, COL_SPACING, ROW_SPACING, BAND_GAP } from "../derive/layout.js";
+import { computeLayout, COL_SPACING, ROW_SPACING, BAND_GAP } from "../derive/layout.js";
 import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode, setBuildingState, getBuildingState, getAvailableResources, getCities, getActiveCityId, getActiveCityName, createCity, deleteCity, renameCity, switchCity, deactivateCity, importCity } from "./filters.js";
 import { parseSaveFile } from "./save-import.js";
 import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAND_COLORS, capitalize } from "./config.js";
-import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
+import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, assignEdgePorts, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
 import { createZoomController } from "./pixi-zoom.js";
 
 import { select } from "./dom.js";
@@ -1381,6 +1381,9 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
     };
   });
 
+  // Assign edge ports (distribute connection points along node boundaries)
+  const ports = assignEdgePorts(visibleEdgeData, nodes, BUILDING_W, BUILDING_H, RESOURCE_R);
+
   // Build adjacency maps for BFS
   const mode = getEdgeMode();
   const bfsDirs = mode === "all" ? null : getVisibleDirections();
@@ -1399,7 +1402,8 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
     const d = visibleEdgeData[i];
     if (!d.fromPos || !d.toPos) continue;
 
-    const points = sampleBezier(d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y, 80);
+    const port = ports[i];
+    const points = sampleBezier(port.fromX, port.fromY, port.toX, port.toY, 80);
 
     // Visible edge
     const visGfx = new Graphics();
@@ -1408,7 +1412,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
 
     // Edge label (lazy — created on demand when zoomed in past threshold)
     let labelText = null;
-    const mid = bezierMidpoint(d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y);
+    const mid = points[Math.floor(points.length / 2)] || { x: 0, y: 0 };
     let labelStr = d.amount ? `${d.label} (${d.amount})` : d.label;
     if (d.recipeId && d.direction === "output") {
       const w = getRecipeWeight(d.recipeId);
@@ -1418,7 +1422,7 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
     // Invisible hit area (wide stroke for interaction)
     const hitGfx = new Graphics();
     hitGfx.setStrokeStyle({ width: 14, color: 0xffffff, alpha: 0.001 });
-    drawSolidBezier(hitGfx, d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y);
+    drawSolidBezier(hitGfx, port.fromX, port.fromY, port.toX, port.toY);
     hitGfx.stroke();
     hitGfx.eventMode = "static";
     hitGfx.cursor = "pointer";
@@ -1429,10 +1433,10 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
       if (!highlightedEdgeIdxs.has(i)) {
         visGfx.clear();
         visGfx.setStrokeStyle({ width: 6, color: 0xe8a830, alpha: 0.12 });
-        drawSolidBezier(visGfx, d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y);
+        drawSolidBezier(visGfx, points[0].x, points[0].y, points[points.length - 1].x, points[points.length - 1].y);
         visGfx.stroke();
         visGfx.setStrokeStyle({ width: 2.5, color: 0xe8a830, alpha: 0.9 });
-        drawSolidBezier(visGfx, d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y);
+        drawSolidBezier(visGfx, points[0].x, points[0].y, points[points.length - 1].x, points[points.length - 1].y);
         visGfx.stroke();
         drawArrowhead(visGfx, points, 0xe8a830, 0.95, 8);
         visGfx.alpha = 1;

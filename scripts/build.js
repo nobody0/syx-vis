@@ -24,6 +24,9 @@ await build({
   entryNames: "[name]",
   chunkNames: "chunks/[name]-[hash]",
   target: ["es2022"],
+  // Redirect pixi.js → slim entry that skips unused subsystems (accessibility,
+  // advanced-blend-modes, compressed-textures, spritesheet, prepare, dom)
+  alias: { "pixi.js": "./display/pixi-slim.js" },
   // Data files are loaded at runtime via fetch/import — inline them into the bundle
   // since they're ES modules imported by graph.js, layout.js etc.
   external: [],

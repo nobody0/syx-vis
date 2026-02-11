@@ -1479,6 +1479,31 @@ function scoreLayoutWithSymmetry(ctx) {
 }
 
 /**
+ * Walk distance tiebreaker for final polish comparison only.
+ * Returns 0–30 points based on avg/max walk distance normalized by room diagonal.
+ * Safe in polishAndScore only (max 30 pts cannot flip primary stat winner: gap = 1000).
+ */
+function computeWalkBonus(ctx) {
+  if (!ctx.furnitureSet.mustBeIndoors || ctx.doors.size === 0) return 0;
+  const avg = computeAvgWalkDistance(ctx, "work");
+  const max = computeMaxWalkDistance(ctx);
+  if (avg === Infinity || max === Infinity) return 0;
+  const diag = Math.sqrt(ctx.gridW ** 2 + ctx.gridH ** 2);
+  const avgNorm = Math.max(0, 1 - avg / diag);
+  const maxNorm = Math.max(0, 1 - max / (diag * 2));
+  return avgNorm * 20 + maxNorm * 10;
+}
+
+/**
+ * Combined tiebreaker: symmetry + walk distance.
+ * Max ~80 pts total (50 symmetry + 30 walk), vs primary × 1000 gap.
+ * Only used in polishAndScore for final comparison.
+ */
+function scoreLayoutWithTiebreakers(ctx) {
+  return scoreLayout(ctx) + computeSymmetryBonus(ctx) + computeWalkBonus(ctx);
+}
+
+/**
  * Compute symmetry bonus for the current layout.
  * Checks mirror (best axis) and 180° rotational symmetry, takes the best.
  * Uses groupGrid to check if transformed tiles have the same group index (or both empty).
@@ -2527,6 +2552,195 @@ function computeMaxWalkDistance(ctx) {
   return maxDist === 0 ? Infinity : maxDist;
 }
 
+/**
+ * BFS distance grid from doors. Returns dist[r][c] (≥1 for reachable walkable tiles, -1 for unreachable).
+ */
+function computeDoorBFS(ctx) {
+  const { gridW, gridH, room, doors } = ctx;
+  const dist = Array.from({ length: gridH }, () => Array(gridW).fill(-1));
+  if (doors.size === 0) return dist;
+  const q = ctx.bfsQueue;
+  q.reset();
+  for (const key of doors) {
+    const [dr, dc] = key.split(",").map(Number);
+    for (const [ddr, ddc] of DIRS) {
+      const nr = dr + ddr, nc = dc + ddc;
+      if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW
+          && room[nr][nc] && ctx.blockerCount[nr][nc] === 0 && dist[nr][nc] < 0) {
+        dist[nr][nc] = 1;
+        q.push(nr, nc);
+      }
+    }
+  }
+  while (q.length > 0) {
+    const [cr, cc] = q.shift();
+    for (const [dr, dc] of DIRS) {
+      const nr = cr + dr, nc = cc + dc;
+      if (nr < 0 || nr >= gridH || nc < 0 || nc >= gridW) continue;
+      if (dist[nr][nc] >= 0 || !room[nr][nc] || ctx.blockerCount[nr][nc] > 0) continue;
+      dist[nr][nc] = dist[cr][cc] + 1;
+      q.push(nr, nc);
+    }
+  }
+  return dist;
+}
+
+/**
+ * Walk polish phase: shift furniture pieces to improve walk distance without reducing score.
+ * Runs AFTER doorPhase (doors are finalized). Two sub-passes:
+ *   W1: Shift pieces away from walk bottlenecks (worst-distance tiles)
+ *   W2: Slide pieces toward nearest door
+ * Score-preserving: only accepts shifts where scoreLayout >= preScore.
+ */
+function walkPolishPhase(ctx) {
+  if (!ctx.furnitureSet.mustBeIndoors || ctx.doors.size === 0) return;
+  const { gridW, gridH } = ctx;
+  const preScore = scoreLayout(ctx);
+
+  // Sub-pass W1: Shift pieces adjacent to worst-distance tiles
+  for (let round = 0; round < 3; round++) {
+    const dist = computeDoorBFS(ctx);
+    let maxDist = 0;
+    for (let r = 0; r < gridH; r++)
+      for (let c = 0; c < gridW; c++)
+        if (dist[r][c] > maxDist) maxDist = dist[r][c];
+    if (maxDist <= 2) break; // already good
+
+    const threshold = Math.max(maxDist - 2, Math.floor(maxDist * 0.7));
+    // Collect placement indices adjacent to high-distance tiles
+    const candidatePIs = new Set();
+    for (let r = 0; r < gridH; r++)
+      for (let c = 0; c < gridW; c++) {
+        if (dist[r][c] < threshold) continue;
+        // Check neighboring tiles for furniture
+        for (const [dr, dc] of DIRS) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < gridH && nc >= 0 && nc < gridW) {
+            const pi = ctx.occupancy[nr][nc];
+            if (pi >= ctx.lockedCount && pi < ctx.placements.length) candidatePIs.add(pi);
+          }
+        }
+      }
+    if (candidatePIs.size === 0) break;
+
+    // Sort by multiplier ascending (cheapest to move first)
+    const sorted = [...candidatePIs].sort((a, b) => {
+      const pa = ctx.placements[a], pb = ctx.placements[b];
+      const ma = ctx.furnitureSet.groups[pa.groupIdx].items[pa.itemIdx].multiplier ?? 1;
+      const mb = ctx.furnitureSet.groups[pb.groupIdx].items[pb.itemIdx].multiplier ?? 1;
+      return ma - mb;
+    });
+
+    let anyMoved = false;
+    const preAvg = computeAvgWalkDistance(ctx, "work");
+    for (const pi of sorted) {
+      const p = ctx.placements[pi];
+      const origRow = p.row, origCol = p.col;
+      // Try 4-directional shifts
+      for (const [sr, sc] of DIRS) {
+        clearOccupancy(ctx, pi);
+        p.row = origRow + sr; p.col = origCol + sc;
+        const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+        let fits = true;
+        for (let r = 0; r < tiles.length && fits; r++)
+          for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+            if (tiles[r][c] === null) continue;
+            const gr = p.row + r, gc = p.col + c;
+            if (gr < 0 || gr >= gridH || gc < 0 || gc >= gridW || !ctx.room[gr][gc]) fits = false;
+            else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+          }
+        if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
+        if (fits) {
+          setOccupancy(ctx, pi);
+          if (scoreLayout(ctx) >= preScore && checkWalkability(ctx)) {
+            const newAvg = computeAvgWalkDistance(ctx, "work");
+            if (newAvg < preAvg) { anyMoved = true; break; }
+          }
+          clearOccupancy(ctx, pi);
+        }
+        p.row = origRow; p.col = origCol;
+        setOccupancy(ctx, pi);
+      }
+    }
+    if (!anyMoved) break;
+  }
+
+  // Sub-pass W2: Slide pieces toward nearest door
+  const doorPositions = [];
+  for (const key of ctx.doors) {
+    const [dr, dc] = key.split(",").map(Number);
+    doorPositions.push([dr, dc]);
+  }
+  if (doorPositions.length === 0) return;
+
+  for (let round = 0; round < 2; round++) {
+    let anyMoved = false;
+    const preAvg = computeAvgWalkDistance(ctx, "work");
+    // Compute centroids and sort by distance to nearest door (farthest first)
+    const piDist = [];
+    for (let pi = ctx.lockedCount; pi < ctx.placements.length; pi++) {
+      const p = ctx.placements[pi];
+      const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+      let cr = 0, cc = 0, cnt = 0;
+      for (let r = 0; r < tiles.length; r++)
+        for (let c = 0; c < (tiles[r]?.length ?? 0); c++)
+          if (tiles[r][c] !== null) { cr += p.row + r; cc += p.col + c; cnt++; }
+      if (cnt === 0) continue;
+      cr /= cnt; cc /= cnt;
+      let minDoor = Infinity;
+      for (const [dr, dc] of doorPositions) {
+        const d = Math.abs(cr - dr) + Math.abs(cc - dc);
+        if (d < minDoor) minDoor = d;
+      }
+      piDist.push({ pi, cr, cc, dist: minDoor });
+    }
+    piDist.sort((a, b) => b.dist - a.dist);
+
+    for (const { pi, cr, cc } of piDist) {
+      const p = ctx.placements[pi];
+      // Find nearest door direction
+      let bestDr = 0, bestDc = 0, bestD = Infinity;
+      for (const [dr, dc] of doorPositions) {
+        const d = Math.abs(cr - dr) + Math.abs(cc - dc);
+        if (d < bestD) { bestD = d; bestDr = dr; bestDc = dc; }
+      }
+      const sr = Math.sign(bestDr - cr), sc = Math.sign(bestDc - cc);
+      if (sr === 0 && sc === 0) continue;
+      const shifts = [];
+      if (sr !== 0 && sc !== 0) shifts.push([sr, sc]);
+      if (sr !== 0) shifts.push([sr, 0]);
+      if (sc !== 0) shifts.push([0, sc]);
+
+      const origRow = p.row, origCol = p.col;
+      for (const [shr, shc] of shifts) {
+        clearOccupancy(ctx, pi);
+        p.row = origRow + shr; p.col = origCol + shc;
+        const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+        let fits = true;
+        for (let r = 0; r < tiles.length && fits; r++)
+          for (let c = 0; c < (tiles[r]?.length ?? 0) && fits; c++) {
+            if (tiles[r][c] === null) continue;
+            const gr = p.row + r, gc = p.col + c;
+            if (gr < 0 || gr >= gridH || gc < 0 || gc >= gridW || !ctx.room[gr][gc]) fits = false;
+            else if (ctx.occupancy[gr][gc] >= 0) fits = false;
+          }
+        if (fits && overlapsReserved(ctx, p.groupIdx, p.itemIdx, p.rotation, p.row, p.col)) fits = false;
+        if (fits) {
+          setOccupancy(ctx, pi);
+          if (scoreLayout(ctx) >= preScore && checkWalkability(ctx)) {
+            const newAvg = computeAvgWalkDistance(ctx, "work");
+            if (newAvg < preAvg) { anyMoved = true; break; }
+          }
+          clearOccupancy(ctx, pi);
+        }
+        p.row = origRow; p.col = origCol;
+        setOccupancy(ctx, pi);
+      }
+    }
+    if (!anyMoved) break;
+  }
+}
+
 function validateFinal(ctx) {
   if (!checkWalkability(ctx)) return false;
   if (!checkStabilityOpt(ctx)) return false;
@@ -3110,6 +3324,46 @@ async function tilingConstructivePass(ctx, config) {
   // Partial sections (room edges, remainders) are left to gapFillPhase and polish
 }
 
+/**
+ * Corridor constructive pass: reserves 1-tile-wide corridor(s) before standard constructive.
+ * Corridors create walk paths through the room; constructivePass avoids reserved tiles.
+ * After constructive, corridors are unreserved so gapFillPhase can place non-blocking items.
+ * @param {object} ctx
+ * @param {{ corridors: Array<{axis:'vertical'|'horizontal', pos:number}>, constructiveConfig: object }} options
+ */
+async function corridorConstructivePass(ctx, options) {
+  const { corridors, constructiveConfig } = options;
+  const { gridW, gridH, room } = ctx;
+
+  // Reserve corridor tiles
+  const corridorKeys = [];
+  for (const cor of corridors) {
+    if (cor.axis === 'vertical') {
+      for (let r = 0; r < gridH; r++) {
+        if (room[r][cor.pos]) {
+          const key = r * gridW + cor.pos;
+          ctx.reservedTiles.add(key);
+          corridorKeys.push(key);
+        }
+      }
+    } else {
+      for (let c = 0; c < gridW; c++) {
+        if (room[cor.pos][c]) {
+          const key = cor.pos * gridW + c;
+          ctx.reservedTiles.add(key);
+          corridorKeys.push(key);
+        }
+      }
+    }
+  }
+
+  // Run standard constructive (respects reserved tiles)
+  await constructivePass(ctx, constructiveConfig);
+
+  // Unreserve corridors so gapFillPhase can place non-blocking items there
+  for (const key of corridorKeys) ctx.reservedTiles.delete(key);
+}
+
 // ══════════════════════════════════════════════════════════
 // Main entry point
 // ══════════════════════════════════════════════════════════
@@ -3264,8 +3518,40 @@ export async function runOptimizer(input) {
       { skipInterval: 0, heroRotate: 1, reverseScan: false, tryAllHeroSizes: false },
     );
   }
+  // Corridor strategies (small/medium rooms only — large rooms use tiling)
+  const corridorConfigs = [];
+  if (!isLargeRoom) {
+    // Find room bounding box
+    let minR = ctx.gridH, maxR = 0, minC = ctx.gridW, maxC = 0;
+    for (const { r, c } of ctx.roomTiles) {
+      if (r < minR) minR = r; if (r > maxR) maxR = r;
+      if (c < minC) minC = c; if (c > maxC) maxC = c;
+    }
+    const roomW = maxC - minC + 1, roomH = maxR - minR + 1;
+    const spacing = Math.max(5, Math.floor(roomW / 3));
+    const baseConfig = { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: false };
+    const baseConfigAlt = { skipInterval: 0, heroRotate: 0, reverseScan: false, tryAllHeroSizes: true };
+    // Generate vertical corridor positions
+    for (let nCor = 1; nCor <= Math.min(3, Math.floor((roomW - 2) / spacing)); nCor++) {
+      const corridors = [];
+      for (let i = 0; i < nCor; i++) {
+        const pos = minC + Math.round((i + 1) * roomW / (nCor + 1));
+        if (pos > minC && pos < maxC) corridors.push({ axis: 'vertical', pos });
+      }
+      if (corridors.length > 0) {
+        corridorConfigs.push({ corridors, constructiveConfig: baseConfig });
+        corridorConfigs.push({ corridors, constructiveConfig: baseConfigAlt });
+      }
+    }
+    // One horizontal corridor at midpoint
+    const midRow = minR + Math.floor(roomH / 2);
+    if (midRow > minR && midRow < maxR) {
+      corridorConfigs.push({ corridors: [{ axis: 'horizontal', pos: midRow }], constructiveConfig: baseConfig });
+    }
+  }
+
   const deferredCount = hasSecondary ? 8 : 0;
-  const totalStrategies = 1 + constructiveConfigs.length + mirrorConfigs.length + rotationalConfigs.length + tilingConfigs.length + deferredCount;
+  const totalStrategies = 1 + constructiveConfigs.length + mirrorConfigs.length + rotationalConfigs.length + tilingConfigs.length + corridorConfigs.length + deferredCount;
   let strategiesDone = 1; // strip already done
   // Strategies span 0.02–0.70 of progress
   const STRAT_START = 0.02, STRAT_END = 0.70;
@@ -3343,6 +3629,25 @@ export async function runOptimizer(input) {
     traceEnd('strategies:tiling');
   }
 
+  // Corridor strategies
+  if (corridorConfigs.length > 0) {
+    traceStart('strategies:corridor');
+    for (const config of corridorConfigs) {
+      const p = STRAT_START + (STRAT_END - STRAT_START) * (strategiesDone / totalStrategies);
+      reportProgress('Searching', `Corridor ${strategiesDone + 1} / ${totalStrategies}`, p);
+      traceStart('strategy:corridor');
+      restoreLightSnapshot(ctx, initialSnapshot);
+      const result = await runStrategy(ctx, (c) => corridorConstructivePass(c, config));
+      if (result.score > bestScore) {
+        bestScore = result.score;
+        bestSnapshot = result.snapshot;
+      }
+      traceEnd('strategy:corridor');
+      strategiesDone++;
+    }
+    traceEnd('strategies:corridor');
+  }
+
   // Track best non-deferred result for fallback comparison
   let bestCoreSnapshot = bestSnapshot;
 
@@ -3389,11 +3694,14 @@ export async function runOptimizer(input) {
     traceStart('polish:door');
     doorPhase(ctx);
     traceEnd('polish:door');
+    traceStart('polish:walk');
+    walkPolishPhase(ctx);
+    traceEnd('polish:walk');
     if (!validateFinal(ctx)) {
       restoreSnapshot(ctx, snapshot);
       doorPhase(ctx);
     }
-    return { score: scoreLayoutWithSymmetry(ctx), snapshot: takeSnapshot(ctx) };
+    return { score: scoreLayoutWithTiebreakers(ctx), snapshot: takeSnapshot(ctx) };
   }
 
   // Try polishing with multiple RNG seeds and keep the best result.
@@ -3430,7 +3738,9 @@ export async function runOptimizer(input) {
   reportProgress('Done', '', 1);
   _progressCb = null;
   const trace = traceSummary();
-  return { room: ctx.room, placements: ctx.placements, doors: ctx.doors, trace };
+  const walkAvg = computeAvgWalkDistance(ctx, "work");
+  const walkMax = computeMaxWalkDistance(ctx);
+  return { room: ctx.room, placements: ctx.placements, doors: ctx.doors, trace, walkAvg, walkMax };
 }
 
 // ── Context creation ─────────────────────────────────────

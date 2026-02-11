@@ -415,7 +415,7 @@ function positionNodes(nodes, columns, bands, neighborsByNode) {
   const numCols = Math.max(...Array.from(columns.values()), 0) + 1;
 
   // Initial positions (needed before first barycenter pass)
-  computePositionsFromGroups(colBandGroups, numCols, positions, nodes);
+  computePositionsFromGroups(colBandGroups, numCols, positions, nodes, neighborsByNode, columns);
 
   // Barycenter sorting: alternating sweep direction, distance-weighted neighbors
   const NUM_PASSES = 6;
@@ -464,7 +464,7 @@ function positionNodes(nodes, columns, bands, neighborsByNode) {
       }
     }
 
-    computePositionsFromGroups(colBandGroups, numCols, positions, nodes);
+    computePositionsFromGroups(colBandGroups, numCols, positions, nodes, neighborsByNode, columns);
   }
 
   return positions;
@@ -472,12 +472,17 @@ function positionNodes(nodes, columns, bands, neighborsByNode) {
 
 /**
  * Compute actual x,y positions from column/band groups.
+ * After initial center-aligned placement, applies a cross-band centering pass
+ * that shifts each (col, band) group toward its cross-band neighbors using
+ * available slack within the band allocation.
  * @param {Map<number, Map<number, string[]>>} colBandGroups
  * @param {number} numCols
  * @param {Map<string, {x: number, y: number, column: number, band: number}>} positions
  * @param {Map<string, Object>} _nodes
+ * @param {Map<string, string[]>} [neighborsByNode]
+ * @param {Map<string, number>} [columns]
  */
-function computePositionsFromGroups(colBandGroups, numCols, positions, _nodes) {
+function computePositionsFromGroups(colBandGroups, numCols, positions, _nodes, neighborsByNode, columns) {
   // Count max nodes per band across all columns
   const maxNodesPerBand = new Map();
   for (let col = 0; col < numCols; col++) {
@@ -498,7 +503,7 @@ function computePositionsFromGroups(colBandGroups, numCols, positions, _nodes) {
     cumulativeY += maxNodes * ROW_SPACING + BAND_GAP;
   }
 
-  // Position each node
+  // Position each node (center-aligned within band allocation)
   for (let col = 0; col < numCols; col++) {
     const bandMap = colBandGroups.get(col);
     if (!bandMap) continue;
@@ -519,6 +524,57 @@ function computePositionsFromGroups(colBandGroups, numCols, positions, _nodes) {
           column: col,
           band,
         });
+      }
+    }
+  }
+
+  // Cross-band centering pass: pull groups toward their cross-band neighbors
+  if (!neighborsByNode || !columns) return;
+
+  for (let col = 0; col < numCols; col++) {
+    const bandMap = colBandGroups.get(col);
+    if (!bandMap) continue;
+
+    for (const [band, nodeIds] of bandMap) {
+      const totalHeight = nodeIds.length * ROW_SPACING;
+      const maxBandHeight = (maxNodesPerBand.get(band) || 1) * ROW_SPACING;
+      const slack = maxBandHeight - totalHeight;
+      if (slack <= 0) continue; // dense column, no room to shift
+
+      // Compute average Y of all cross-band neighbors
+      let neighborYSum = 0;
+      let neighborCount = 0;
+      for (const nid of nodeIds) {
+        const neighbors = neighborsByNode.get(nid) || [];
+        for (const neighborId of neighbors) {
+          const npos = positions.get(neighborId);
+          if (!npos) continue;
+          // Only pull toward neighbors in other bands
+          if (npos.band === band) continue;
+          neighborYSum += npos.y;
+          neighborCount++;
+        }
+      }
+      if (neighborCount === 0) continue;
+
+      const avgNeighborY = neighborYSum / neighborCount;
+
+      // Current group center
+      const first = positions.get(nodeIds[0]);
+      const last = positions.get(nodeIds[nodeIds.length - 1]);
+      if (!first || !last) continue;
+      const currentCenter = (first.y + last.y) / 2;
+
+      // Clamp shift to stay within band allocation
+      const maxShift = slack / 2;
+      const rawShift = avgNeighborY - currentCenter;
+      const shift = Math.max(-maxShift, Math.min(maxShift, rawShift));
+
+      if (Math.abs(shift) < 1) continue; // negligible
+
+      for (const nid of nodeIds) {
+        const pos = positions.get(nid);
+        if (pos) pos.y += shift;
       }
     }
   }
