@@ -3,12 +3,12 @@
 ## Global Rules
 
 1. **No made-up data.** Data files are auto-generated from the game's `data.zip` via `scripts/extract-game-data.js`. Do not hand-edit `data/resources.js`, `data/buildings.js`, `data/needs.js`, `data/tech.js`, `data/equipment.js`, or `data/races.js` — re-run the extraction script instead.
-2. **No build tools.** This is a zero-build project. All JS files use plain ES modules (`import`/`export`). No npm, no bundler, no transpiler.
-3. **Libraries via CDN only.** D3.js v7 loaded from CDN in `index.html`. Layout is custom (`derive/layout.js`).
+2. **esbuild bundling for production.** `npm run build` bundles `display/main.js` → `dist/` with tree-shaking + minification. `npm run dev` serves raw source for development (no build step needed). Dependencies (`pixi.js`, `d3-selection`) are installed locally via npm.
+3. **Libraries via npm.** `d3-selection` (not full D3) and `pixi.js` installed as dependencies, bundled by esbuild. Layout is custom (`derive/layout.js`).
 4. **Bipartite graph model.** Both resources AND buildings are nodes. Resources are circles (colored by resource category). Buildings are rounded rectangles (colored by building category). Recipes are edges: input resources → building → output resources.
 5. **Columns = build-cost score** (construction materials × tech costs). Layout bands: materials (top), civilian, services, military (bottom).
-6. **Keep it simple.** No over-engineering. Minimal CSS. Single `index.html` entry point. Serve with `npx http-server . -c-1` and open in browser.
-7. **ES Modules require HTTP server.** `file://` blocks imports due to CORS. Always use `npx http-server . -c-1` for local dev.
+6. **Keep it simple.** No over-engineering. Minimal CSS. Single `index.html` entry point. Dev: `npm run dev`. Production: `npm run build && npm start`.
+7. **ES Modules require HTTP server.** `file://` blocks imports due to CORS. Use `npm run dev` for development, `npm start` for bundled production.
 
 ## Data Pipeline
 
@@ -40,6 +40,7 @@ syx-vis/
   eslint.config.js        <- ESLint flat config (no-undef, eqeqeq, no-shadow)
   types.js                <- JSDoc @typedef declarations (Resource, Building, GraphEdge, etc.)
   scripts/
+    build.js               <- esbuild bundler: bundles to dist/, copies assets, rewrites paths
     extract-game-data.js   <- Node.js script: reads data.zip, generates all data files + icons
     diag-padding.js        <- diagnostic script for sprite padding analysis
   data/
@@ -54,7 +55,8 @@ syx-vis/
     graph.js               <- build dependency graph from data (+World Map pseudo-building)
     layout.js              <- semantic layout: X=build-cost, Y=category bands
   display/
-    render.js              <- D3/SVG rendering (Graph tab)
+    main.js                <- application entry point (imported by index.html)
+    render.js              <- PixiJS WebGL rendering (Graph tab)
     filters.js             <- filter panel (search, category toggles, per-resource controls)
     config.js              <- centralized color config (category colors, band config)
     tabs.js                <- tab switching logic, lazy-initializes tab content
@@ -62,6 +64,7 @@ syx-vis/
     balancing.js           <- Production Balancing tab (upstream chain requirements)
     upkeep.js              <- Building Upkeep tab (maintenance costs from value degradation)
     style.css              <- minimal dark-theme styles
+  dist/                    <- bundled output (gitignored, built by npm run build)
 ```
 
 ## Conventions
@@ -87,8 +90,8 @@ syx-vis/
 
 The site is deployed to **GitHub Pages** at `https://nobody0.github.io/syx-vis/`.
 
-- **How:** A GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`. It uploads the repo root as a Pages artifact — no build step, since this is a static site.
-- **What's served:** The entire repo root. Dev-only files (`scripts/`, config) are included but harmless (not linked from the app).
+- **How:** A GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`. It runs `npm ci && npm run build`, then uploads `dist/` as a Pages artifact.
+- **What's served:** Only the `dist/` folder — bundled + minified JS, CSS, icons, sprites, and index.html.
 - **Icon case sensitivity:** GitHub Pages runs on Linux (case-sensitive). All icon filenames in `data/icons/` must be lowercase to match the references in `data/resources.js` and `data/buildings.js`. On Windows, `git config core.ignorecase true` can silently preserve old capitalized names in the index — if icons 404 on Pages, check `git ls-files data/icons/ | grep '[A-Z]'` and fix with `core.ignorecase=false`, `git rm --cached -r data/icons/`, `git add data/icons/`.
 
 ## Current Data (v70)

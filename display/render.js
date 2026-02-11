@@ -8,7 +8,7 @@ import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAN
 import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, DASH_PATTERNS, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
 import { createZoomController } from "./pixi-zoom.js";
 
-const d3 = window.d3;
+import * as d3 from "d3-selection";
 
 // Node dimensions
 const RESOURCE_R = 32;
@@ -2872,6 +2872,7 @@ function buildCitySelector(onFilterChange) {
   // Select dropdown
   const select = document.createElement("select");
   select.className = "city-select";
+  select.setAttribute("aria-label", "Select city");
 
   const exploreOpt = document.createElement("option");
   exploreOpt.value = "";
@@ -3253,7 +3254,12 @@ function dismissOnboarding() {
 // Main entry point
 // ══════════════════════════════════════════════════════════
 
-export async function render() {
+const yieldToMain = () => new Promise(r => setTimeout(r, 0));
+
+export async function render(setStatus) {
+  const status = typeof setStatus === "function" ? setStatus : () => {};
+
+  status("Building graph\u2026");
   const { nodes, edges } = buildGraph();
   fullNodes = nodes;
   fullEdges = edges;
@@ -3287,7 +3293,10 @@ export async function render() {
     }
   }
 
+  await yieldToMain();
+
   // Initialize renderer (creates WebGL context first)
+  status("Initializing renderer\u2026");
   await initRenderer();
 
   // Pause rendering while building the scene
@@ -3295,13 +3304,20 @@ export async function render() {
   app.ticker.stop();
 
   // Preload icons (batched, after WebGL context exists)
+  status("Loading icons\u2026");
   await preloadIcons(fullNodes);
   buildLegend();
 
+  await yieldToMain();
+
   // Full layout positions
+  status("Computing layout\u2026");
   const allEdges = edges.filter(e => e.direction !== "upgrade");
   fullLayoutPositions = computeLayout(nodes, allEdges, allEdges);
 
+  await yieldToMain();
+
+  status("Building filters\u2026");
   const onFilterChange = () => {
     recomputeCitySets();
     const hasWhatIf = whatIfResources || whatIfBuildings || whatIfUpgrades;
@@ -3317,7 +3333,10 @@ export async function render() {
   buildCitySelector(onFilterChange);
   buildFilterPanel(fullNodes, fullEdges, onFilterChange, (id) => navigateToNode(id));
 
+  await yieldToMain();
+
   // Initial render
+  status("Rendering graph\u2026");
   recomputeCitySets();
   const initial = applyFilters(fullNodes, fullEdges);
   updateGraph(initial.nodes, initial.edges, initial.layoutEdges, initial.filteredOutNodes, initial.filteredOutEdges);

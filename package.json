@@ -5,16 +5,23 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "start": "npx http-server . -c-1",
+    "build": "node scripts/build.js",
+    "start": "node scripts/build.js && npx http-server dist -c-1",
+    "dev": "npx http-server . -c-1",
     "check": "tsc --project jsconfig.json --noEmit",
     "lint": "eslint .",
     "validate": "npm run check && npm run lint"
   },
   "devDependencies": {
-    "eslint": "^9",
     "@eslint/js": "^9",
+    "esbuild": "^0.27.3",
+    "eslint": "^9",
     "globals": "^15",
     "pngjs": "^7.0.0",
     "typescript": "^5"
+  },
+  "dependencies": {
+    "d3-selection": "^3.0.0",
+    "pixi.js": "^8.16.0"
   }
 }

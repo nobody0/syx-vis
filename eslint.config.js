@@ -7,7 +7,7 @@ export default [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
-      globals: { ...globals.browser, d3: "readonly" }
+      globals: { ...globals.browser }
     },
     rules: {
       "no-unused-vars": ["warn", { argsIgnorePattern: "^_", varsIgnorePattern: "^_", destructuredArrayIgnorePattern: "^_" }],
@@ -23,5 +23,5 @@ export default [
       globals: { ...globals.node }
     }
   },
-  { ignores: ["data/*.js"] }
+  { ignores: ["data/*.js", "dist/**"] }
 ];

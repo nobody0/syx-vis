@@ -23,20 +23,6 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="display/style.css">
 
-  <!-- D3.js v7.9.0 (UMD, attaches to window.d3) -->
-  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
-          integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
-          crossorigin="anonymous"></script>
-
-  <!-- PixiJS v8.6.6 import map (WebGL canvas renderer for graph tab) -->
-  <script type="importmap">
-  {
-    "imports": {
-      "pixi.js": "https://cdn.jsdelivr.net/npm/pixi.js@8.6.6/dist/pixi.min.mjs"
-    }
-  }
-  </script>
-
   <!-- Structured data for search engines -->
   <script type="application/ld+json">
   {
@@ -75,6 +61,12 @@
     <button id="help-btn" title="Help (?)" aria-label="Help">?</button>
   </div>
 
+  <div id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-status">Loading&hellip;</div>
+  </div>
+
+  <main id="main-content">
   <div id="view-graph" class="view active">
     <div id="breadcrumb-bar"></div>
 
@@ -235,31 +227,8 @@
     </div>
   </div>
 
-  <!--
-    ES Modules require an HTTP server — file:// will block imports due to CORS.
-    Serve with:  npx serve .
-    Then open:   http://localhost:3000
-  -->
-  <script type="module">
-    try {
-      const { render } = await import("./display/render.js");
-      const { initTabs, switchTab, restorePlan } = await import("./display/tabs.js");
-      const { initRouter } = await import("./display/router.js");
-      const { initHelp } = await import("./display/help.js");
-      await render();
-      initTabs();
-      initHelp();
-      initRouter(switchTab, restorePlan);
-    } catch (err) {
-      document.body.style.display = "flex";
-      document.body.style.justifyContent = "center";
-      document.body.style.paddingTop = "20vh";
-      document.body.innerHTML = `<div style="color:#d8d2c4;font-family:system-ui;text-align:center">
-        <h2 style="font-family:Georgia,serif;font-style:italic">Failed to load</h2>
-        <p style="color:#a09882">${err.message || err}</p>
-        <p style="color:#706858;font-size:13px">Check the browser console for details.</p>
-      </div>`;
-    }
-  </script>
+  </main>
+
+  <script type="module" src="display/main.js"></script>
 </body>
 </html>

@@ -2763,6 +2763,7 @@ function buildSelector(container) {
   g1.appendChild(doorLabel);
   const doorSelect = document.createElement("select");
   doorSelect.className = "planner-opt-select";
+  doorSelect.setAttribute("aria-label", "Door count");
   for (const [val, text] of [[0, "Auto"], [1, "1"], [2, "2"], [3, "3"]]) {
     const opt = document.createElement("option");
     opt.value = val;
