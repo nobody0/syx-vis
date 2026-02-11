@@ -3157,6 +3157,42 @@ body:has(.focus-bar) #breadcrumb-bar {
   cursor: wait;
 }
 
+/* ── Optimizer settings (inline with optimize btn) ───── */
+.planner-opt-setting {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+.planner-opt-setting input[type="checkbox"] {
+  accent-color: var(--accent-gold);
+  margin: 0;
+}
+.planner-opt-setting-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 10px;
+  white-space: nowrap;
+}
+.planner-opt-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 11px;
+  padding: 2px 4px;
+  margin-left: 2px;
+  cursor: pointer;
+}
+.planner-opt-select:hover {
+  border-color: var(--border-medium);
+}
+
 /* ── Optimizer progress overlay ──────────────────────── */
 .optimize-overlay {
   position: absolute;

@@ -432,7 +432,9 @@ const state = {
   room: [],          // boolean[][] — true = room tile
   placements: [],    // {groupIdx, itemIdx, rotation, row, col}
   mode: "draw",      // "draw"|"erase"|"remove"|"place"|"door"
-  shape: "rect",     // "rect"|"brush" — applies to draw/erase
+  shape: "rect",     // "rect"|"brush"|"circle"|"diamond"|"cross" — applies to draw/erase
+  keepShape: false,  // optimizer: don't trim room
+  maxDoors: 0,       // optimizer: 0 = auto, 1-3 = limit
   selectedGroupIdx: -1,
   selectedItemIdx: -1,
   rotation: 0,       // 0-3, 90° CW increments
@@ -683,7 +685,7 @@ function buildGrid(container) {
     // draw or erase
     pushUndo();
     paintValue = state.mode === "draw";
-    if (state.shape === "rect") {
+    if (state.shape !== "brush") {
       rectStart = { r, c };
       showRectPreview(r, c, r, c, paintValue);
     } else {
@@ -779,7 +781,11 @@ function buildGrid(container) {
       const cell = e.target.closest(".planner-cell");
       if (cell) {
         const r = Number(cell.dataset.r), c = Number(cell.dataset.c);
-        fillRect(rectStart.r, rectStart.c, r, c, paintValue);
+        const fillFn = state.shape === "circle" ? fillCircle
+          : state.shape === "diamond" ? fillDiamond
+          : state.shape === "cross" ? fillCross
+          : fillRect;
+        fillFn(rectStart.r, rectStart.c, r, c, paintValue);
       }
       rectStart = null;
       clearRectPreview();
@@ -886,16 +892,95 @@ function fillRect(r1, c1, r2, c2, isRoom) {
   syncUrl();
 }
 
+function fillCircle(r1, c1, r2, c2, isRoom) {
+  const minR = Math.max(0, Math.min(r1, r2));
+  const maxR = Math.min(state.gridH - 1, Math.max(r1, r2));
+  const minC = Math.max(0, Math.min(c1, c2));
+  const maxC = Math.min(state.gridW - 1, Math.max(c1, c2));
+  const cr = (minR + maxR) / 2, cc = (minC + maxC) / 2;
+  const ry = (maxR - minR) / 2 + 0.5, rx = (maxC - minC) / 2 + 0.5;
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      if (((r - cr) / ry) ** 2 + ((c - cc) / rx) ** 2 <= 1) {
+        paintCell(r, c, isRoom);
+      }
+    }
+  }
+  recomputeWallMetrics();
+  refreshGrid();
+  refreshStats();
+  refreshValidation();
+  updateOptimizeBtn();
+  syncUrl();
+}
+
+function fillDiamond(r1, c1, r2, c2, isRoom) {
+  const minR = Math.max(0, Math.min(r1, r2));
+  const maxR = Math.min(state.gridH - 1, Math.max(r1, r2));
+  const minC = Math.max(0, Math.min(c1, c2));
+  const maxC = Math.min(state.gridW - 1, Math.max(c1, c2));
+  const cr = (minR + maxR) / 2, cc = (minC + maxC) / 2;
+  const ry = (maxR - minR) / 2 + 0.5, rx = (maxC - minC) / 2 + 0.5;
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      if (Math.abs(r - cr) / ry + Math.abs(c - cc) / rx <= 1) {
+        paintCell(r, c, isRoom);
+      }
+    }
+  }
+  recomputeWallMetrics();
+  refreshGrid();
+  refreshStats();
+  refreshValidation();
+  updateOptimizeBtn();
+  syncUrl();
+}
+
+function fillCross(r1, c1, r2, c2, isRoom) {
+  const minR = Math.max(0, Math.min(r1, r2));
+  const maxR = Math.min(state.gridH - 1, Math.max(r1, r2));
+  const minC = Math.max(0, Math.min(c1, c2));
+  const maxC = Math.min(state.gridW - 1, Math.max(c1, c2));
+  const h = maxR - minR + 1, w = maxC - minC + 1;
+  const rBand0 = minR + Math.floor(h / 3), rBand1 = minR + Math.ceil(2 * h / 3) - 1;
+  const cBand0 = minC + Math.floor(w / 3), cBand1 = minC + Math.ceil(2 * w / 3) - 1;
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      if ((r >= rBand0 && r <= rBand1) || (c >= cBand0 && c <= cBand1)) {
+        paintCell(r, c, isRoom);
+      }
+    }
+  }
+  recomputeWallMetrics();
+  refreshGrid();
+  refreshStats();
+  refreshValidation();
+  updateOptimizeBtn();
+  syncUrl();
+}
+
 function showRectPreview(r1, c1, r2, c2, _isRoom) {
   clearRectPreview();
   const minR = Math.max(0, Math.min(r1, r2));
   const maxR = Math.min(state.gridH - 1, Math.max(r1, r2));
   const minC = Math.max(0, Math.min(c1, c2));
   const maxC = Math.min(state.gridW - 1, Math.max(c1, c2));
+  const shape = state.shape;
+  const cr = (minR + maxR) / 2, cc = (minC + maxC) / 2;
+  const ry = (maxR - minR) / 2 + 0.5, rx = (maxC - minC) / 2 + 0.5;
+  const h = maxR - minR + 1, w = maxC - minC + 1;
+  const rBand0 = minR + Math.floor(h / 3), rBand1 = minR + Math.ceil(2 * h / 3) - 1;
+  const cBand0 = minC + Math.floor(w / 3), cBand1 = minC + Math.ceil(2 * w / 3) - 1;
   for (let r = minR; r <= maxR; r++) {
     for (let c = minC; c <= maxC; c++) {
-      const cell = cellEls[r]?.[c];
-      if (cell) cell.classList.add("rect-preview");
+      let inside = true;
+      if (shape === "circle") inside = ((r - cr) / ry) ** 2 + ((c - cc) / rx) ** 2 <= 1;
+      else if (shape === "diamond") inside = Math.abs(r - cr) / ry + Math.abs(c - cc) / rx <= 1;
+      else if (shape === "cross") inside = (r >= rBand0 && r <= rBand1) || (c >= cBand0 && c <= cBand1);
+      if (inside) {
+        const cell = cellEls[r]?.[c];
+        if (cell) cell.classList.add("rect-preview");
+      }
     }
   }
 }
@@ -1941,6 +2026,9 @@ function buildToolbar(container) {
 
   const shapes = [
     { key: "rect", label: "Rectangle" },
+    { key: "circle", label: "Circle" },
+    { key: "diamond", label: "Diamond" },
+    { key: "cross", label: "Cross" },
     { key: "brush", label: "Brush" },
   ];
 
@@ -2531,6 +2619,8 @@ async function runAutoOptimize(btn) {
       room: state.room.map(row => [...row]),
       placements: state.placements.map(p => ({ ...p })),
       doors: new Set(state.doors),
+      keepShape: state.keepShape,
+      maxDoors: state.maxDoors,
       onProgress: (info) => updateOptimizeOverlay(overlay, btn, info),
     });
 
@@ -2656,6 +2746,33 @@ function buildSelector(container) {
   optimizeBtn.addEventListener("click", () => runAutoOptimize(optimizeBtn));
   g1.appendChild(optimizeBtn);
   optimizeBtnRef = optimizeBtn;
+
+  // Keep Shape checkbox
+  const keepLabel = el("label", "planner-opt-setting");
+  keepLabel.title = "By default the optimizer can shrink the room to remove unused tiles. Enable this to preserve the exact room footprint you drew.";
+  const keepCb = document.createElement("input");
+  keepCb.type = "checkbox";
+  keepCb.checked = state.keepShape;
+  keepCb.addEventListener("change", () => { state.keepShape = keepCb.checked; });
+  keepLabel.appendChild(keepCb);
+  keepLabel.appendChild(document.createTextNode(" Keep shape"));
+  g1.appendChild(keepLabel);
+
+  // Door count dropdown
+  const doorLabel = elText("span", "Doors:", "planner-opt-setting-label");
+  g1.appendChild(doorLabel);
+  const doorSelect = document.createElement("select");
+  doorSelect.className = "planner-opt-select";
+  for (const [val, text] of [[0, "Auto"], [1, "1"], [2, "2"], [3, "3"]]) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = text;
+    if (val === state.maxDoors) opt.selected = true;
+    doorSelect.appendChild(opt);
+  }
+  doorSelect.addEventListener("change", () => { state.maxDoors = Number(doorSelect.value); });
+  g1.appendChild(doorSelect);
+
   actionsRow.appendChild(g1);
 
   actionsRow.appendChild(el("span", "planner-actions-sep"));

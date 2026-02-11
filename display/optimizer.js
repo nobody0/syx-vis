@@ -2328,6 +2328,9 @@ function doorPhase(ctx) {
   if (candidates.length === 0) return;
 
   while (candidates.length > 0) {
+    // Door count limit: stop when user-specified max is reached
+    if (ctx.maxDoors > 0 && ctx.doors.size >= ctx.maxDoors) break;
+
     for (let i = candidates.length - 1; i >= 0; i--) {
       const cand = candidates[i];
       ctx.doors.add(`${cand.r},${cand.c}`);
@@ -2974,7 +2977,7 @@ export async function runOptimizer(input) {
   traceStart('analyzePhase');
   analyzePhase(ctx);
   traceEnd('analyzePhase');
-  preCleanRoom(ctx);
+  if (!ctx.keepShape) preCleanRoom(ctx);
   await placeRegularPillars(ctx);
 
   // Place one early door for indoor buildings (provides structural anchor)
@@ -3172,7 +3175,7 @@ export async function runOptimizer(input) {
     await localSearchPhase(ctx);
     traceEnd('polish:localSearch');
     traceStart('polish:trim');
-    await trimPhase(ctx);
+    if (!ctx.keepShape) await trimPhase(ctx);
     traceEnd('polish:trim');
     traceStart('polish:door');
     doorPhase(ctx);
@@ -3224,6 +3227,8 @@ export async function runOptimizer(input) {
 // ── Context creation ─────────────────────────────────────
 function createContext(input) {
   const { building, furnitureSet, gridW, gridH, room, placements, doors } = input;
+  const keepShape = !!input.keepShape;
+  const maxDoors = input.maxDoors || 0; // 0 = auto/unlimited
   if (!building || !furnitureSet) return null;
 
   let roomCount = 0;
@@ -3270,6 +3275,8 @@ function createContext(input) {
   ctx.unstableTileCount = 0;
   ctx.reservedTiles = new Set();
   ctx.userDoors = new Set(clonedDoors);
+  ctx.keepShape = keepShape;
+  ctx.maxDoors = maxDoors;
 
   return ctx;
 }
