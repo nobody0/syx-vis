@@ -145,12 +145,12 @@ export function drawDashedCurve(g, points, pattern, offset = 0) {
  * @type {Record<string, number[]>}
  */
 export const DASH_PATTERNS = {
-  construction: [8, 4],
-  upgrade: [4, 4],
-  equipment: [6, 3, 2, 3],
-  ammo: [6, 3, 2, 3],
-  sacrifice: [6, 3, 2, 3],
-  synthetic: [4, 6],
+  construction: [14, 5],
+  upgrade: [12, 5],
+  equipment: [10, 4, 3, 4],
+  ammo: [10, 4, 3, 4],
+  sacrifice: [10, 4, 3, 4],
+  synthetic: [6, 8],
 };
 
 /**
@@ -159,15 +159,15 @@ export const DASH_PATTERNS = {
  * @type {Record<string, number>}
  */
 export const EDGE_COLORS = {
-  input: 0x5878a0,
-  output: 0x5878a0,
-  construction: 0x4890c8,
-  upgrade: 0x8860c0,
-  equipment: 0xd89840,
-  ammo: 0xd85858,
-  sacrifice: 0xc04888,
-  synthetic: 0x506878,
-  area: 0x5878a0,
+  input: 0x6890b8,
+  output: 0x6890b8,
+  construction: 0x58a0d8,
+  upgrade: 0x9870d0,
+  equipment: 0xe0a850,
+  ammo: 0xe06868,
+  sacrifice: 0xd05898,
+  synthetic: 0x586878,
+  area: 0x6890b8,
 };
 
 /**
@@ -175,15 +175,15 @@ export const EDGE_COLORS = {
  * @type {Record<string, number>}
  */
 export const EDGE_ALPHAS = {
-  input: 0.35,
-  output: 0.35,
-  construction: 0.32,
-  upgrade: 0.38,
-  equipment: 0.35,
-  ammo: 0.35,
-  sacrifice: 0.35,
-  synthetic: 0.18,
-  area: 0.30,
+  input: 0.40,
+  output: 0.40,
+  construction: 0.38,
+  upgrade: 0.40,
+  equipment: 0.40,
+  ammo: 0.40,
+  sacrifice: 0.40,
+  synthetic: 0.20,
+  area: 0.38,
 };
 
 /**

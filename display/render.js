@@ -5,7 +5,7 @@ import { computeLayout, bezierMidpoint, COL_SPACING, ROW_SPACING, BAND_GAP } fro
 import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode, setBuildingState, getBuildingState, getAvailableResources, getCities, getActiveCityId, getActiveCityName, createCity, deleteCity, renameCity, switchCity, deactivateCity, importCity } from "./filters.js";
 import { parseSaveFile } from "./save-import.js";
 import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAND_COLORS, capitalize } from "./config.js";
-import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, DASH_PATTERNS, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
+import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
 import { createZoomController } from "./pixi-zoom.js";
 
 import * as d3 from "d3-selection";
@@ -93,6 +93,7 @@ let detailResTooltip = null;
 let highlightedEdgeIdxs = new Map(); // idx → {color, width}
 let dashOffset = 0;
 let edgeLabelsCreated = false;
+let currentZoomScale = 1; // tracked for zoom-adaptive edge rendering
 
 // Stats bar counts (for re-rendering on selection change)
 let lastNodeCount = 0;
@@ -497,41 +498,42 @@ function redrawNodeSelectionRing(strokeGfx, data) {
   }
 }
 
-function redrawEdgeNormal(visGfx, data, points) {
+function redrawEdgeNormal(visGfx, data, points, scale) {
   visGfx.clear();
-  const color = EDGE_COLORS[data.direction] ?? 0x5878a0;
-  const alpha = EDGE_ALPHAS[data.direction] ?? 0.35;
-  const dashPattern = DASH_PATTERNS[data.direction];
+  const color = EDGE_COLORS[data.direction] ?? 0x6890b8;
+  const baseAlpha = EDGE_ALPHAS[data.direction] ?? 0.40;
   const isSynthetic = data.direction === "synthetic";
+  const s = scale || currentZoomScale;
 
-  // Production edges are slightly thicker and more visible
-  const width = isSynthetic ? 0.8 : dashPattern ? 1.3 : 1.6;
+  const baseWidth = isSynthetic ? 1.0 : 1.8;
+  const width = Math.max(baseWidth, Math.min(1.2 / s, baseWidth * 1.5));
+  const alpha = s < 0.5 ? Math.min(baseAlpha + (0.5 - s) * 0.3, baseAlpha * 1.3) : baseAlpha;
 
   visGfx.setStrokeStyle({ width, color, alpha });
-  if (dashPattern) {
-    drawDashedCurve(visGfx, points, dashPattern);
-  } else {
-    drawSolidBezier(visGfx, points[0].x, points[0].y, points[points.length - 1].x, points[points.length - 1].y);
-  }
+  drawSolidBezier(visGfx, points[0].x, points[0].y, points[points.length - 1].x, points[points.length - 1].y);
   visGfx.stroke();
 
-  // Arrowhead — kite shape, larger for production edges
-  const arrowSize = (!dashPattern && !isSynthetic) ? 8 : 6;
-  const arrowAlpha = isSynthetic ? alpha * 0.6 : Math.min(alpha * 1.5, 0.65);
-  drawArrowhead(visGfx, points, color, arrowAlpha, arrowSize);
+  if (!isSynthetic && 7 * s >= 2) {
+    drawArrowhead(visGfx, points, color, Math.min(alpha * 1.4, 0.65), 7);
+  }
 }
 
 function redrawEdgeHighlighted(visGfx, points, color, width) {
   visGfx.clear();
+  const s = currentZoomScale;
 
-  // Faint glow underlay (wider, very transparent)
-  visGfx.setStrokeStyle({ width: width + 4, color, alpha: 0.08 });
+  const w = Math.max(width, Math.min(2.5 / s, width * 2));
+  const glowW = w + 4;
+
+  // Glow underlay
+  visGfx.setStrokeStyle({ width: glowW, color, alpha: 0.10 });
   drawSolidBezier(visGfx, points[0].x, points[0].y, points[points.length - 1].x, points[points.length - 1].y);
   visGfx.stroke();
 
   // Animated flowing dashes
-  visGfx.setStrokeStyle({ width, color, alpha: 0.9 });
-  drawDashedCurve(visGfx, points, [12, 6], dashOffset);
+  const dashScale = s < 0.5 ? 0.5 / s : 1;
+  visGfx.setStrokeStyle({ width: w, color, alpha: 0.9 });
+  drawDashedCurve(visGfx, points, [12 * dashScale, 6 * dashScale], dashOffset);
   visGfx.stroke();
 
   drawArrowhead(visGfx, points, color, 0.95, 8);
@@ -1121,6 +1123,18 @@ async function initRenderer() {
       const show = scale >= 0.5;
       edgeLabelLayer.visible = show;
       if (show && !edgeLabelsCreated) materializeEdgeLabels();
+
+      // Redraw non-highlighted edges with zoom-adaptive stroke width
+      const prevScale = currentZoomScale;
+      currentZoomScale = scale;
+      // Only redraw if scale changed meaningfully (avoid wasted GPU work)
+      if (Math.abs(scale - prevScale) / (prevScale || 1) > 0.05) {
+        for (const [idx, entry] of edgeGfxMap) {
+          if (!highlightedEdgeIdxs.has(idx)) {
+            redrawEdgeNormal(entry.visGfx, entry.data, entry.points, scale);
+          }
+        }
+      }
     },
   });
 
@@ -1412,21 +1426,13 @@ function updateGraph(nodes, edges, layoutEdges, filteredOutNodes, filteredOutEdg
     hitGfx.on("pointerenter", (evt) => {
       hideTooltip();
       showEdgeTooltip(evt, d);
-      // Highlight edge on hover (gold stroke + glow underlay)
       if (!highlightedEdgeIdxs.has(i)) {
         visGfx.clear();
-        // Glow underlay
-        visGfx.setStrokeStyle({ width: 6, color: 0xe8a830, alpha: 0.10 });
+        visGfx.setStrokeStyle({ width: 6, color: 0xe8a830, alpha: 0.12 });
         drawSolidBezier(visGfx, d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y);
         visGfx.stroke();
-        // Main highlight
         visGfx.setStrokeStyle({ width: 2.5, color: 0xe8a830, alpha: 0.9 });
-        const dashPattern = DASH_PATTERNS[d.direction];
-        if (dashPattern) {
-          drawDashedCurve(visGfx, points, dashPattern);
-        } else {
-          drawSolidBezier(visGfx, d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y);
-        }
+        drawSolidBezier(visGfx, d.fromPos.x, d.fromPos.y, d.toPos.x, d.toPos.y);
         visGfx.stroke();
         drawArrowhead(visGfx, points, 0xe8a830, 0.95, 8);
         visGfx.alpha = 1;
@@ -1878,8 +1884,10 @@ function renderGhostEdges(filteredOutEdges, layoutPositions) {
   if (!filteredOutEdges || filteredOutEdges.length === 0) return;
 
   const gfx = new Graphics();
-  gfx.alpha = 0.10;
-  gfx.setStrokeStyle({ width: 0.7, color: 0x4a6480, alpha: 0.25 });
+  const s = currentZoomScale;
+  const ghostWidth = Math.min(Math.max(1.0, 1.0 / s), 3);
+  gfx.alpha = 0.15;
+  gfx.setStrokeStyle({ width: ghostWidth, color: 0x4a6480, alpha: 0.30 });
 
   for (const e of filteredOutEdges) {
     const fromPos = fullLayoutPositions.get(e.from) || layoutPositions.get(e.from);

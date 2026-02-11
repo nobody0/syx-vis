@@ -416,6 +416,7 @@ body::after {
   visibility: visible;
   opacity: 1;
   transform: translateX(0);
+  z-index: 12;
 }
 
 #detail-panel h2 {
@@ -1194,12 +1195,7 @@ body::after {
   background: rgba(200, 160, 64, 0.12);
   box-shadow: 0 0 10px rgba(200, 160, 64, 0.08);
 }
-.detail-state-btn.active.state-built {
-  border-color: var(--state-produced);
-  color: var(--state-produced);
-  background: rgba(96, 184, 88, 0.12);
-  box-shadow: 0 0 10px rgba(96, 184, 88, 0.08);
-}
+.detail-state-btn.active.state-built,
 .detail-state-btn.active.state-produced {
   border-color: var(--state-produced);
   color: var(--state-produced);
@@ -1231,7 +1227,6 @@ body::after {
   letter-spacing: 1px;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
-
 
 /* ── Edge mode bar ────────────────────────────────── */
 
@@ -1540,7 +1535,6 @@ body::after {
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
 
-
 /* Hide graph-only overlays on non-graph tabs (these are appended to body, not inside #view-graph) */
 body:has(.view.active:not(#view-graph)) .zoom-controls,
 body:has(.view.active:not(#view-graph)) .onboarding-hint,
@@ -1622,6 +1616,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   flex-shrink: 0;
   transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
+
 #github-link {
   display: flex;
   align-items: center;
@@ -1711,6 +1706,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
 }
 
 .help-getting-started {
+  margin-top: 14px;
   margin-bottom: 6px;
 }
 
@@ -1719,6 +1715,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   font-size: 13px;
   line-height: 1.6;
 }
+.help-description + .help-description { margin-top: 12px; }
 .help-description strong {
   color: var(--text-primary);
 }
@@ -1730,6 +1727,30 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   border-radius: 3px;
   padding: 1px 5px;
 }
+
+/* Help content — section labels get top margin */
+.help-content .help-section-label { margin-top: 16px; }
+
+/* Help demo shapes — colored samples in getting-started table */
+.help-sample-circle {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  box-shadow: 0 0 3px rgba(0,0,0,0.4);
+  vertical-align: middle;
+}
+.help-sample-rect {
+  display: inline-block;
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+  box-shadow: 0 0 3px rgba(0,0,0,0.4);
+  vertical-align: middle;
+}
+
+/* Shortcut table strong inherits primary color */
+.shortcut-table strong { color: var(--text-primary); }
 
 .shortcut-table {
   width: 100%;
