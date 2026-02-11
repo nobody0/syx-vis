@@ -74,6 +74,14 @@
   --hl-downstream-glow: rgba(255, 183, 77, 0.4);
   --hl-selected: #e0e0e0;
   --hl-selected-glow: rgba(224, 224, 224, 0.45);
+
+  /* Planner */
+  --planner-room: rgba(65, 120, 175, 0.32);
+  --planner-room-solid: rgba(80, 130, 170, 0.50);
+  --planner-avoid: rgba(200, 170, 60, 0.45);
+  --planner-avoid-hard: rgba(200, 120, 40, 0.50);
+  --planner-solid: rgba(120, 140, 160, 0.50);
+  --planner-panel: rgba(10, 16, 24, 0.55);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -192,9 +200,11 @@ body::after {
 
 /* ── Edge tooltip ───────────────────────────────────── */
 
-.edge-tooltip {
+/* Shared tooltip base */
+.edge-tooltip,
+.graph-tooltip,
+#detail-res-tooltip {
   position: fixed;
-  z-index: 100;
   pointer-events: none;
   background: var(--bg-panel-solid);
   border: 1px solid var(--border-ornate);
@@ -203,10 +213,23 @@ body::after {
   box-shadow: 0 6px 20px rgba(0,0,0,0.6);
   opacity: 0;
   transition: opacity 0.15s ease;
-  max-width: 300px;
 }
-.edge-tooltip.visible {
-  opacity: 1;
+.edge-tooltip.visible,
+.graph-tooltip.visible,
+#detail-res-tooltip.visible { opacity: 1; }
+
+/* Shared icon drop-shadow */
+.search-res-icon,
+.resource-row-icon,
+.calc-table .resource-name img,
+.producer-card-icon,
+.species-matrix .matrix-pref-icon {
+  filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
+}
+
+.edge-tooltip {
+  z-index: 100;
+  max-width: 300px;
 }
 
 .edge-tooltip-route {
@@ -517,14 +540,36 @@ body::after {
   font-size: 12px;
 }
 
-/* Detail panel scrollbar */
-#detail-panel::-webkit-scrollbar { width: 4px; }
-#detail-panel::-webkit-scrollbar-thumb {
+/* Shared 4px vertical scrollbar */
+#detail-panel::-webkit-scrollbar,
+.resource-state-grid::-webkit-scrollbar,
+.filter-body::-webkit-scrollbar,
+.search-dropdown::-webkit-scrollbar,
+.planner-sidebar::-webkit-scrollbar,
+.blueprint-list::-webkit-scrollbar { width: 4px; }
+
+#detail-panel::-webkit-scrollbar-thumb,
+.resource-state-grid::-webkit-scrollbar-thumb,
+.filter-body::-webkit-scrollbar-thumb,
+.search-dropdown::-webkit-scrollbar-thumb,
+.planner-sidebar::-webkit-scrollbar-thumb,
+.blueprint-list::-webkit-scrollbar-thumb {
   background: var(--border-medium);
   border-radius: 2px;
 }
-#detail-panel::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
-#detail-panel::-webkit-scrollbar-track { background: transparent; }
+#detail-panel::-webkit-scrollbar-thumb:hover,
+.resource-state-grid::-webkit-scrollbar-thumb:hover,
+.filter-body::-webkit-scrollbar-thumb:hover,
+.search-dropdown::-webkit-scrollbar-thumb:hover,
+.planner-sidebar::-webkit-scrollbar-thumb:hover,
+.blueprint-list::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+#detail-panel::-webkit-scrollbar-track,
+.resource-state-grid::-webkit-scrollbar-track,
+.filter-body::-webkit-scrollbar-track,
+.search-dropdown::-webkit-scrollbar-track,
+.planner-sidebar::-webkit-scrollbar-track,
+.blueprint-list::-webkit-scrollbar-track { background: transparent; }
 
 /* ── Filter panel ───────────────────────────────────── */
 
@@ -619,7 +664,17 @@ body::after {
   padding: 0;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
-.filter-collapse-btn:hover {
+/* Shared gold hover effect */
+.filter-collapse-btn:hover,
+.detail-state-btn:hover,
+.filter-reset-btn:hover,
+.zoom-controls button:hover,
+#help-btn:hover,
+#github-link:hover,
+.focus-bar-exit:hover,
+.detail-focus-btn:hover,
+.city-btn:hover,
+.city-import-btn:hover {
   border-color: var(--accent-gold-dim);
   color: var(--accent-gold);
   background: var(--accent-gold-glow);
@@ -683,14 +738,14 @@ body::after {
   color: var(--text-primary);
 }
 
-/* ── Custom checkboxes ──────────────────────────────── */
+/* ── Custom checkboxes (shared base) ────────────────── */
 
-.filter-cat-row input[type="checkbox"] {
+.filter-cat-row input[type="checkbox"],
+.state-cb-wrap input[type="checkbox"],
+.recipe-weight-cb {
   -webkit-appearance: none;
   -moz-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
   border: 1.5px solid var(--border-medium);
   border-radius: 2px;
   background: var(--bg-input);
@@ -699,15 +754,12 @@ body::after {
   flex-shrink: 0;
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
-.filter-cat-row input[type="checkbox"]:checked {
-  background: var(--accent-gold-dim);
-  border-color: var(--accent-gold);
-}
-.filter-cat-row input[type="checkbox"]::after {
+.filter-cat-row input[type="checkbox"]::after,
+.state-cb-wrap input[type="checkbox"]::after,
+.recipe-weight-cb::after {
   content: "";
   position: absolute;
   top: 1px;
-  left: 4px;
   width: 4px;
   height: 7px;
   border: solid var(--text-bright);
@@ -716,11 +768,39 @@ body::after {
   opacity: 0;
   transition: opacity 0.15s ease;
 }
-.filter-cat-row input[type="checkbox"]:checked::after {
+.filter-cat-row input[type="checkbox"]:checked::after,
+.state-cb-wrap input[type="checkbox"]:checked::after,
+.recipe-weight-cb:checked::after {
   opacity: 1;
 }
-.filter-cat-row input[type="checkbox"]:hover {
+.filter-cat-row input[type="checkbox"]:hover,
+.state-cb-wrap input[type="checkbox"]:hover,
+.recipe-weight-cb:hover {
   border-color: var(--accent-gold-dim);
+}
+
+/* Checkbox size variants */
+.filter-cat-row input[type="checkbox"],
+.state-cb-wrap input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+}
+.filter-cat-row input[type="checkbox"]::after,
+.state-cb-wrap input[type="checkbox"]::after { left: 4px; }
+
+.recipe-weight-cb {
+  width: 13px;
+  height: 13px;
+}
+.recipe-weight-cb::after { left: 3px; }
+
+/* Checkbox checked colors */
+.filter-cat-row input[type="checkbox"]:checked {
+  background: var(--accent-gold-dim);
+  border-color: var(--accent-gold);
+}
+.state-cb-wrap input[type="checkbox"] {
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .cat-swatch {
@@ -847,7 +927,6 @@ body::after {
   height: 20px;
   image-rendering: pixelated;
   flex-shrink: 0;
-  filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
 }
 
 .search-swatch {
@@ -940,14 +1019,6 @@ body::after {
   background: rgba(0,0,0,0.12);
 }
 
-.resource-state-grid::-webkit-scrollbar { width: 4px; }
-.resource-state-grid::-webkit-scrollbar-thumb {
-  background: var(--border-medium);
-  border-radius: 2px;
-}
-.resource-state-grid::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
-.resource-state-grid::-webkit-scrollbar-track { background: transparent; }
-
 .resource-state-row {
   display: flex;
   align-items: center;
@@ -987,7 +1058,6 @@ body::after {
   height: 18px;
   image-rendering: pixelated;
   flex-shrink: 0;
-  filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
 }
 
 .resource-state-name {
@@ -1007,21 +1077,6 @@ body::after {
   cursor: pointer;
 }
 
-.state-cb-wrap input[type="checkbox"] {
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border: 1.5px solid var(--border-medium);
-  border-radius: 2px;
-  background: var(--bg-input);
-  cursor: pointer;
-  position: relative;
-  flex-shrink: 0;
-  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
 /* State-specific checkbox colors */
 .state-cb-wrap.cb-bought input[type="checkbox"]:checked {
   background: rgba(200, 160, 64, 0.3);
@@ -1037,26 +1092,6 @@ body::after {
   background: rgba(176, 104, 64, 0.3);
   border-color: var(--state-ignored);
   box-shadow: 0 0 4px rgba(176, 104, 64, 0.2);
-}
-
-.state-cb-wrap input[type="checkbox"]::after {
-  content: "";
-  position: absolute;
-  top: 1px;
-  left: 4px;
-  width: 4px;
-  height: 7px;
-  border: solid var(--text-bright);
-  border-width: 0 1.5px 1.5px 0;
-  transform: rotate(45deg);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.state-cb-wrap input[type="checkbox"]:checked::after {
-  opacity: 1;
-}
-.state-cb-wrap input[type="checkbox"]:hover {
-  border-color: var(--accent-gold-dim);
 }
 
 /* Species-specific rate styling */
@@ -1119,13 +1154,8 @@ body::after {
   text-transform: uppercase;
   letter-spacing: 0.8px;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+  position: relative;
 }
-.detail-state-btn:hover {
-  border-color: var(--accent-gold-dim);
-  color: var(--accent-gold);
-  background: var(--accent-gold-glow);
-}
-
 .detail-state-btn.active.state-bought {
   border-color: var(--state-bought);
   color: var(--state-bought);
@@ -1169,11 +1199,7 @@ body::after {
   letter-spacing: 1px;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
-.filter-reset-btn:hover {
-  border-color: var(--accent-gold-dim);
-  color: var(--accent-gold);
-  background: var(--accent-gold-glow);
-}
+
 
 /* ── Edge mode bar ────────────────────────────────── */
 
@@ -1210,44 +1236,12 @@ body::after {
   background: var(--accent-gold-glow);
 }
 
-/* ── Scrollbar styling ──────────────────────────────── */
-
-.filter-body::-webkit-scrollbar,
-.search-dropdown::-webkit-scrollbar {
-  width: 4px;
-}
-.filter-body::-webkit-scrollbar-thumb,
-.search-dropdown::-webkit-scrollbar-thumb {
-  background: var(--border-medium);
-  border-radius: 2px;
-}
-.filter-body::-webkit-scrollbar-thumb:hover,
-.search-dropdown::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
-}
-.filter-body::-webkit-scrollbar-track,
-.search-dropdown::-webkit-scrollbar-track {
-  background: transparent;
-}
 
 /* ── Graph tooltip ──────────────────────────────────── */
 
 .graph-tooltip {
-  position: fixed;
   z-index: 100;
-  pointer-events: none;
-  background: var(--bg-panel-solid);
-  border: 1px solid var(--border-ornate);
-  border-radius: 3px;
-  padding: 8px 12px;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.6);
-  opacity: 0;
-  transition: opacity 0.15s ease;
   max-width: 220px;
-}
-
-.graph-tooltip.visible {
-  opacity: 1;
 }
 
 .graph-tooltip-name {
@@ -1511,17 +1505,13 @@ body::after {
   transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
-.zoom-controls button:hover {
-  color: var(--accent-gold);
-  border-color: var(--accent-gold-dim);
-  background: var(--accent-gold-glow);
-}
+
 
 /* Hide graph-only overlays on non-graph tabs (these are appended to body, not inside #view-graph) */
-body:has(.view.active:not(#view-graph)) .zoom-controls { display: none; }
-body:has(.view.active:not(#view-graph)) .onboarding-hint { display: none; }
-body:has(.view.active:not(#view-graph)) .focus-bar { display: none; }
-body:has(.view.active:not(#view-graph)) .edge-tooltip { display: none; }
+body:has(.view.active:not(#view-graph)) .zoom-controls,
+body:has(.view.active:not(#view-graph)) .onboarding-hint,
+body:has(.view.active:not(#view-graph)) .focus-bar,
+body:has(.view.active:not(#view-graph)) .edge-tooltip,
 body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
 
 /* ── Tab bar ──────────────────────────────────────── */
@@ -1596,11 +1586,6 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   flex-shrink: 0;
   transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
-#help-btn:hover {
-  color: var(--accent-gold);
-  border-color: var(--accent-gold-dim);
-  background: var(--accent-gold-glow);
-}
 #github-link {
   display: flex;
   align-items: center;
@@ -1614,11 +1599,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   flex-shrink: 0;
   transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
-#github-link:hover {
-  color: var(--accent-gold);
-  border-color: var(--accent-gold-dim);
-  background: var(--accent-gold-glow);
-}
+
 
 /* ── Shortcut help overlay ───────────────────────── */
 
@@ -1774,15 +1755,16 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   padding: 0 28px;
   position: relative;
   z-index: 1;
-  animation: calc-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: content-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-@keyframes calc-enter {
+@keyframes content-enter {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
-.calc-content h2 {
+.calc-content h2,
+.planner-content h2 {
   font-family: var(--font-display);
   font-size: 26px;
   font-weight: 700;
@@ -1791,6 +1773,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   letter-spacing: 0.3px;
   margin-bottom: 4px;
 }
+.planner-content h2 { margin-bottom: 2px; }
 
 .calc-content h3 {
   font-family: var(--font-display);
@@ -1833,7 +1816,6 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   margin: 12px 0 22px;
   padding: 10px 14px;
   background: rgba(80, 70, 50, 0.06);
-  border-left: 3px solid var(--border-ornate);
   border-radius: 0 4px 4px 0;
   line-height: 1.65;
   border: 1px solid rgba(130, 120, 95, 0.12);
@@ -1901,7 +1883,6 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   width: 18px;
   height: 18px;
   image-rendering: pixelated;
-  filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
 }
 
 .calc-table .group-header td {
@@ -2022,42 +2003,9 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   vertical-align: middle;
 }
 
-.recipe-weight-cb {
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  appearance: none;
-  width: 13px;
-  height: 13px;
-  border: 1.5px solid var(--border-medium);
-  border-radius: 2px;
-  background: var(--bg-input);
-  cursor: pointer;
-  position: relative;
-  flex-shrink: 0;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
 .recipe-weight-cb:checked {
   background: rgba(96, 184, 88, 0.3);
   border-color: var(--state-produced);
-}
-.recipe-weight-cb::after {
-  content: "";
-  position: absolute;
-  top: 1px;
-  left: 3px;
-  width: 4px;
-  height: 7px;
-  border: solid var(--text-bright);
-  border-width: 0 1.5px 1.5px 0;
-  transform: rotate(45deg);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.recipe-weight-cb:checked::after {
-  opacity: 1;
-}
-.recipe-weight-cb:hover {
-  border-color: var(--accent-gold-dim);
 }
 
 .recipe-weight-num {
@@ -2152,20 +2100,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
 }
 
 /* Tags for terminal/warning rows */
-.bal-bought-tag {
-  display: inline-block;
-  padding: 1px 6px;
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  background: rgba(200, 160, 64, 0.12);
-  color: var(--state-bought);
-  border: 1px solid rgba(200, 160, 64, 0.2);
-  border-radius: 3px;
-  margin-right: 6px;
-}
-
+.bal-bought-tag,
 .bal-warn-tag {
   display: inline-block;
   padding: 1px 6px;
@@ -2173,11 +2108,18 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  border-radius: 3px;
+  margin-right: 6px;
+}
+.bal-bought-tag {
+  background: rgba(200, 160, 64, 0.12);
+  color: var(--state-bought);
+  border: 1px solid rgba(200, 160, 64, 0.2);
+}
+.bal-warn-tag {
   background: rgba(176, 104, 64, 0.12);
   color: var(--state-ignored);
   border: 1px solid rgba(176, 104, 64, 0.2);
-  border-radius: 3px;
-  margin-right: 6px;
 }
 
 .bal-weight-input {
@@ -2204,20 +2146,10 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
 /* ── Detail panel resource hover tooltip ──────────── */
 
 #detail-res-tooltip {
-  position: fixed;
   z-index: 110;
-  pointer-events: none;
-  background: var(--bg-panel-solid);
-  border: 1px solid var(--border-ornate);
-  border-radius: 3px;
-  padding: 8px 12px;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.6);
-  opacity: 0;
-  transition: opacity 0.15s ease;
   max-width: 280px;
   font-size: 12px;
 }
-#detail-res-tooltip.visible { opacity: 1; }
 
 .drt-header {
   font-family: var(--font-display);
@@ -2288,7 +2220,6 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   height: 24px;
   image-rendering: pixelated;
   flex-shrink: 0;
-  filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
 }
 .producer-card-name {
   font-family: var(--font-display);
@@ -2480,9 +2411,6 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
 
 /* ── State button tooltips ─────────────────────────── */
 
-.detail-state-btn {
-  position: relative;
-}
 .state-tooltip {
   position: absolute;
   bottom: calc(100% + 6px);
@@ -2497,7 +2425,6 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   text-transform: none;
   letter-spacing: 0;
   color: var(--text-secondary);
-  white-space: nowrap;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s ease;
@@ -2562,11 +2489,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   margin-left: 4px;
   transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
 }
-.focus-bar-exit:hover {
-  color: var(--accent-gold);
-  border-color: var(--accent-gold-dim);
-  background: var(--accent-gold-glow);
-}
+
 
 .focus-bar-whatif {
   color: #4fc3f7;
@@ -2634,11 +2557,7 @@ body:has(.view.active:not(#view-graph)) .graph-tooltip { display: none; }
   margin-left: 8px;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
-.detail-focus-btn:hover {
-  border-color: var(--accent-gold-dim);
-  color: var(--accent-gold);
-  background: var(--accent-gold-glow);
-}
+
 
 .focus-indicator {
   display: flex;
@@ -2861,7 +2780,6 @@ body:has(.focus-bar) #breadcrumb-bar {
   height: 20px;
   image-rendering: pixelated;
   vertical-align: middle;
-  filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
   cursor: help;
 }
 .species-matrix .matrix-pref-all {
@@ -2953,42 +2871,18 @@ body:has(.focus-bar) #breadcrumb-bar {
 
 /* ── Room Planner tab ────────────────────────────────── */
 
-:root {
-  --planner-room: rgba(65, 120, 175, 0.32);
-  --planner-room-solid: rgba(80, 130, 170, 0.50);
-  --planner-avoid: rgba(200, 170, 60, 0.45);
-  --planner-avoid-hard: rgba(200, 120, 40, 0.50);
-  --planner-solid: rgba(120, 140, 160, 0.50);
-  --planner-panel: rgba(10, 16, 24, 0.55);
-}
-
 .planner-content {
   max-width: 1200px;
   margin: 80px auto 40px;
   padding: 0 28px;
   position: relative;
   z-index: 1;
-  animation: planner-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-
-@keyframes planner-enter {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  animation: content-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /* Header */
 .planner-header {
   margin-bottom: 16px;
-}
-
-.planner-content h2 {
-  font-family: var(--font-display);
-  font-size: 26px;
-  font-weight: 700;
-  font-style: italic;
-  color: var(--accent-gold);
-  letter-spacing: 0.3px;
-  margin-bottom: 2px;
 }
 
 .planner-subtitle {
@@ -3047,12 +2941,15 @@ body:has(.focus-bar) #breadcrumb-bar {
   gap: 3px;
 }
 
-.planner-actions-sep {
+.planner-actions-sep,
+.planner-toolbar-sep {
   width: 1px;
-  height: 20px;
   background: linear-gradient(180deg, transparent, var(--border-medium), transparent);
-  margin: 0 6px;
   flex-shrink: 0;
+}
+.planner-actions-sep {
+  height: 20px;
+  margin: 0 6px;
 }
 
 .planner-actions-group-label {
@@ -3118,11 +3015,8 @@ body:has(.focus-bar) #breadcrumb-bar {
 
 /* Toolbar group separators */
 .planner-toolbar-sep {
-  width: 1px;
   height: 18px;
-  background: linear-gradient(180deg, transparent, var(--border-medium), transparent);
   margin: 0 4px;
-  flex-shrink: 0;
 }
 
 .planner-tool-btn {
@@ -3699,13 +3593,6 @@ body:has(.focus-bar) #breadcrumb-bar {
   gap: 12px;
 }
 
-.planner-sidebar::-webkit-scrollbar { width: 4px; }
-.planner-sidebar::-webkit-scrollbar-thumb {
-  background: var(--border-medium);
-  border-radius: 2px;
-}
-.planner-sidebar::-webkit-scrollbar-track { background: transparent; }
-
 /* Section headers */
 .planner-section-header {
   font-family: var(--font-body);
@@ -3946,8 +3833,6 @@ body:has(.focus-bar) #breadcrumb-bar {
 }
 
 /* Validation */
-.planner-validation {}
-
 .planner-valid-ok,
 .planner-valid-warn,
 .planner-valid-error,
@@ -4166,11 +4051,6 @@ body:has(.focus-bar) #breadcrumb-bar {
   overflow: hidden;
   line-height: 1;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
-}
-.city-btn:hover {
-  border-color: var(--accent-gold-dim);
-  color: var(--accent-gold);
-  background: var(--accent-gold-glow);
 }
 .city-del-btn:hover {
   border-color: var(--state-ignored);
@@ -4395,13 +4275,6 @@ body:has(.focus-bar) #breadcrumb-bar {
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-input);
 }
-.blueprint-list::-webkit-scrollbar { width: 4px; }
-.blueprint-list::-webkit-scrollbar-thumb {
-  background: var(--border-medium);
-  border-radius: 2px;
-}
-.blueprint-list::-webkit-scrollbar-track { background: transparent; }
-
 .blueprint-empty {
   padding: 36px 20px;
   text-align: center;
@@ -4576,30 +4449,7 @@ body:has(.focus-bar) #breadcrumb-bar {
   gap: 8px;
 }
 
-.blueprint-import-btn {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 10px 16px !important;
-  background: rgba(96, 184, 88, 0.06) !important;
-  border: 1px solid rgba(96, 184, 88, 0.2) !important;
-  border-radius: 5px !important;
-  color: rgba(96, 184, 88, 0.9) !important;
-  font-size: 12px !important;
-  font-weight: 500 !important;
-  transition: all 0.15s ease !important;
-}
-.blueprint-import-btn:hover {
-  background: rgba(96, 184, 88, 0.12) !important;
-  border-color: rgba(96, 184, 88, 0.4) !important;
-  color: #80d878 !important;
-}
-.blueprint-import-btn .btn-icon {
-  font-size: 14px;
-}
-
+.blueprint-import-btn,
 .blueprint-export-btn {
   flex: 1;
   display: flex;
@@ -4607,13 +4457,31 @@ body:has(.focus-bar) #breadcrumb-bar {
   justify-content: center;
   gap: 6px;
   padding: 10px 16px !important;
-  background: rgba(90, 158, 255, 0.06) !important;
-  border: 1px solid rgba(90, 158, 255, 0.2) !important;
   border-radius: 5px !important;
-  color: rgba(90, 158, 255, 0.9) !important;
   font-size: 12px !important;
   font-weight: 500 !important;
   transition: all 0.15s ease !important;
+}
+.blueprint-import-btn .btn-icon,
+.blueprint-export-btn .btn-icon {
+  font-size: 14px;
+}
+
+.blueprint-import-btn {
+  background: rgba(96, 184, 88, 0.06) !important;
+  border: 1px solid rgba(96, 184, 88, 0.2) !important;
+  color: rgba(96, 184, 88, 0.9) !important;
+}
+.blueprint-import-btn:hover {
+  background: rgba(96, 184, 88, 0.12) !important;
+  border-color: rgba(96, 184, 88, 0.4) !important;
+  color: #80d878 !important;
+}
+
+.blueprint-export-btn {
+  background: rgba(90, 158, 255, 0.06) !important;
+  border: 1px solid rgba(90, 158, 255, 0.2) !important;
+  color: rgba(90, 158, 255, 0.9) !important;
 }
 .blueprint-export-btn:hover {
   background: rgba(90, 158, 255, 0.12) !important;
@@ -4623,9 +4491,6 @@ body:has(.focus-bar) #breadcrumb-bar {
 .blueprint-export-btn:disabled {
   opacity: 0.4;
   cursor: wait;
-}
-.blueprint-export-btn .btn-icon {
-  font-size: 14px;
 }
 
 .blueprint-path-row {
@@ -4746,11 +4611,6 @@ body:has(.focus-bar) #breadcrumb-bar {
 
 .city-import-btn {
   font-size: 11px !important;
-}
-.city-import-btn:hover {
-  border-color: var(--accent-gold-dim);
-  color: var(--accent-gold);
-  background: var(--accent-gold-glow);
 }
 
 .save-import-modal {
