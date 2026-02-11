@@ -155,35 +155,50 @@ export const DASH_PATTERNS = {
 
 /**
  * Edge color for each direction type.
- * Warmer tones for production flow, cooler for infrastructure.
+ * Blue production, amber construction, violet upgrade — max hue separation on thin lines.
  * @type {Record<string, number>}
  */
 export const EDGE_COLORS = {
-  input: 0x6890b8,
-  output: 0x6890b8,
-  construction: 0x58a0d8,
-  upgrade: 0x9870d0,
-  equipment: 0xe0a850,
-  ammo: 0xe06868,
-  sacrifice: 0xd05898,
-  synthetic: 0x586878,
-  area: 0x6890b8,
+  input: 0x6898c0,       // medium blue — production flow
+  output: 0x6898c0,
+  construction: 0xc8a050, // amber — building materials
+  upgrade: 0x9878d8,      // violet — tier 1 default (see getEdgeColor)
+  equipment: 0x50b880,    // teal-green
+  ammo: 0xe06868,         // red
+  sacrifice: 0xd05898,    // pink
+  synthetic: 0x586878,    // dark grey
+  area: 0xb89048,         // darker amber — per-tile costs
 };
+
+/** Upgrade tier colors: tier 1 = violet, tier 2 = lighter violet */
+const UPGRADE_TIER_COLORS = [0x9878d8, 0xb898e8];
+
+/**
+ * Resolve edge color, accounting for upgrade tiers.
+ * @param {{direction: string, tier?: number}} data
+ * @returns {number}
+ */
+export function getEdgeColor(data) {
+  if (data.direction === "upgrade" && data.tier >= 1) {
+    return UPGRADE_TIER_COLORS[Math.min(data.tier - 1, UPGRADE_TIER_COLORS.length - 1)];
+  }
+  return EDGE_COLORS[data.direction] ?? 0x6898c0;
+}
 
 /**
  * Edge alpha for each direction type.
  * @type {Record<string, number>}
  */
 export const EDGE_ALPHAS = {
-  input: 0.40,
-  output: 0.40,
-  construction: 0.38,
-  upgrade: 0.40,
-  equipment: 0.40,
-  ammo: 0.40,
-  sacrifice: 0.40,
+  input: 0.45,
+  output: 0.45,
+  construction: 0.50,
+  upgrade: 0.50,
+  equipment: 0.45,
+  ammo: 0.45,
+  sacrifice: 0.45,
   synthetic: 0.20,
-  area: 0.38,
+  area: 0.45,
 };
 
 /**

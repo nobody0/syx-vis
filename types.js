@@ -201,6 +201,7 @@ export {};
  * @property {string} [recipeId]
  * @property {number} amount
  * @property {"input"|"output"|"construction"|"upgrade"|"equipment"|"ammo"|"sacrifice"|"area"|"synthetic"} direction
+ * @property {number} [tier]
  */
 
 /**

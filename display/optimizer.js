@@ -237,6 +237,122 @@ function traceSummary() {
   return rows;
 }
 
+// ── Merge adjacent placements ────────────────────────────
+
+/** Build a set of "row,col" strings for a placement's absolute tile positions. */
+function getAbsolutePositions(ctx, p) {
+  const tiles = getCachedTiles(ctx, p.groupIdx, p.itemIdx, p.rotation);
+  const pos = new Set();
+  for (let r = 0; r < tiles.length; r++)
+    for (let c = 0; c < (tiles[r]?.length ?? 0); c++)
+      if (tiles[r][c] !== null) pos.add(`${p.row + r},${p.col + c}`);
+  return pos;
+}
+
+/** Check if two position sets have any 4-adjacent tiles. */
+function areAdjacentPositions(posA, posB) {
+  for (const key of posA) {
+    const [r, c] = key.split(',').map(Number);
+    for (const [dr, dc] of DIRS)
+      if (posB.has(`${r + dr},${c + dc}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Post-optimization pass: merge adjacent same-group placements into larger items
+ * that cover the exact same positions. Score-neutral but produces cleaner layouts.
+ * Matches by position coverage only (not tile keys) since items within a group
+ * share the same availability types, keeping walkability unchanged.
+ */
+function mergeAdjacentPlacements(ctx) {
+  const fs = ctx.furnitureSet;
+  let merged = true;
+  while (merged) {
+    merged = false;
+    // Group all pieces by groupIdx (not rotation — candidates try all rotations)
+    /** @type {Map<number, number[]>} */
+    const buckets = new Map();
+    for (let pi = 0; pi < ctx.placements.length; pi++) {
+      const p = ctx.placements[pi];
+      let list = buckets.get(p.groupIdx);
+      if (!list) { list = []; buckets.set(p.groupIdx, list); }
+      list.push(pi);
+    }
+
+    outer:
+    for (const indices of buckets.values()) {
+      if (indices.length < 2) continue;
+      for (let a = 0; a < indices.length; a++) {
+        const piA = indices[a];
+        const pA = ctx.placements[piA];
+        const posA = getAbsolutePositions(ctx, pA);
+        for (let b = a + 1; b < indices.length; b++) {
+          const piB = indices[b];
+          const pB = ctx.placements[piB];
+          const posB = getAbsolutePositions(ctx, pB);
+
+          if (!areAdjacentPositions(posA, posB)) continue;
+
+          // Build union position set
+          const union = new Set(posA);
+          for (const k of posB) union.add(k);
+
+          // Bounding box of union
+          let minR = Infinity, minC = Infinity;
+          for (const key of union) {
+            const [r, c] = key.split(',').map(Number);
+            if (r < minR) minR = r;
+            if (c < minC) minC = c;
+          }
+
+          const gi = pA.groupIdx;
+          const group = fs.groups[gi];
+          const multA = (group.items[pA.itemIdx]?.multiplierStats ?? group.items[pA.itemIdx]?.multiplier) || 0;
+          const multB = (group.items[pB.itemIdx]?.multiplierStats ?? group.items[pB.itemIdx]?.multiplier) || 0;
+          const sumMult = multA + multB;
+          const allowedRots = getAllowedRotations(group);
+
+          // Try each item × each rotation as merge candidate
+          for (let ii = 0; ii < group.items.length; ii++) {
+            const cand = group.items[ii];
+            const candMult = (cand.multiplierStats ?? cand.multiplier) || 0;
+            if (candMult < sumMult) continue;
+
+            for (const rot of allowedRots) {
+              const candTiles = getCachedTiles(ctx, gi, ii, rot);
+              // Build candidate position set at bounding-box origin
+              const candPos = new Set();
+              for (let r = 0; r < candTiles.length; r++)
+                for (let c = 0; c < (candTiles[r]?.length ?? 0); c++)
+                  if (candTiles[r][c] !== null) candPos.add(`${minR + r},${minC + c}`);
+
+              // Exact position match: same count and same positions
+              if (candPos.size !== union.size) continue;
+              let match = true;
+              for (const k of union) {
+                if (!candPos.has(k)) { match = false; break; }
+              }
+              if (!match) continue;
+
+              // Check group min constraint: merging reduces count by 1
+              if (ctx.groupCounts[gi] - 1 < group.min) continue;
+
+              // Merge: replace piA with merged item, remove piB (piA < piB always)
+              ctx.placements[piA] = { groupIdx: gi, itemIdx: ii, rotation: rot, row: minR, col: minC };
+              ctx.placements.splice(piB, 1);
+              rebuildOccupancyInPlace(ctx);
+              rebuildGroupCounts(ctx);
+              merged = true;
+              break outer;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 // ── Primary stat detection ───────────────────────────────
 function findPrimaryStatIndex(fs, _building) {
   if (!fs.stats || fs.stats.length === 0) return 0;
@@ -3734,6 +3850,7 @@ export async function runOptimizer(input) {
     }
   }
   restoreSnapshot(ctx, bestFinalSnapshot);
+  mergeAdjacentPlacements(ctx);
 
   reportProgress('Done', '', 1);
   _progressCb = null;

@@ -34,53 +34,23 @@
   --accent-gold-dim: #b08420;
   --accent-gold-glow: rgba(224, 170, 56, 0.14);
 
-  /* Accent – patina */
-  --accent-copper: #c06838;
-
   /* State colors */
   --state-bought: #c8a040;
   --state-produced: #60b858;
   --state-ignored: #b06840;
 
-  /* Category colors – resource */
+  /* Category colors – resource (only material used; rest set dynamically by render.js) */
   --res-material: #5a9eff;
-  --res-food: #6cd45a;
-  --res-drink: #ffaa44;
-  --res-military: #ff5555;
 
-  /* Category colors – building */
-  --bld-extraction: #5ab858;
-  --bld-husbandry: #48c8a0;
-  --bld-refining: #7070cc;
+  /* Category colors – building (only crafting used; rest set dynamically by render.js) */
   --bld-crafting: #d88848;
-  --bld-logistics: #5890bb;
-  --bld-military: #d04848;
-  --bld-service: #9870c8;
-  --bld-trade: #98c050;
-  --bld-infrastructure: #888888;
-
-  /* Edges */
-  --edge-normal: rgba(100, 125, 155, 0.40);
-  --edge-highlight: #e0aa38;
 
   /* Panels */
   --panel-radius: 4px;
   --panel-shadow: 0 6px 32px rgba(0,0,0,0.55), 0 1px 3px rgba(0,0,0,0.35);
 
-  /* Directional chain highlighting */
-  --hl-upstream: #4fc3f7;
-  --hl-upstream-glow: rgba(79, 195, 247, 0.4);
-  --hl-downstream: #ffb74d;
-  --hl-downstream-glow: rgba(255, 183, 77, 0.4);
-  --hl-selected: #e0e0e0;
-  --hl-selected-glow: rgba(224, 224, 224, 0.45);
-
   /* Planner */
   --planner-room: rgba(65, 120, 175, 0.32);
-  --planner-room-solid: rgba(80, 130, 170, 0.50);
-  --planner-avoid: rgba(200, 170, 60, 0.45);
-  --planner-avoid-hard: rgba(200, 120, 40, 0.50);
-  --planner-solid: rgba(120, 140, 160, 0.50);
   --planner-panel: rgba(10, 16, 24, 0.55);
 }
 
@@ -1238,12 +1208,12 @@ body::after {
 }
 
 .legend-line-construction {
-  background: repeating-linear-gradient(90deg, rgba(70,140,200,0.6) 0px, rgba(70,140,200,0.6) 4px, transparent 4px, transparent 7px);
+  background: repeating-linear-gradient(90deg, rgba(200,160,80,0.65) 0px, rgba(200,160,80,0.65) 4px, transparent 4px, transparent 7px);
   height: 2px;
 }
 
 .legend-line-upgrade {
-  background: repeating-linear-gradient(90deg, rgba(140,90,200,0.6) 0px, rgba(140,90,200,0.6) 3px, transparent 3px, transparent 6px);
+  background: repeating-linear-gradient(90deg, rgba(152,120,216,0.65) 0px, rgba(152,120,216,0.65) 3px, transparent 3px, transparent 6px);
   height: 2px;
 }
 

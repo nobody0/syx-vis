@@ -6,7 +6,7 @@ import { layout as precomputedLayout } from "../data/layout.js";
 import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode, setBuildingState, getBuildingState, getAvailableResources, getCities, getActiveCityId, getActiveCityName, createCity, deleteCity, renameCity, switchCity, deactivateCity, importCity } from "./filters.js";
 import { parseSaveFile } from "./save-import.js";
 import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAND_COLORS, capitalize } from "./config.js";
-import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, assignEdgePorts, EDGE_COLORS, EDGE_ALPHAS } from "./pixi-edges.js";
+import { sampleBezier, drawSolidBezier, drawDashedCurve, drawArrowhead, assignEdgePorts, getEdgeColor, EDGE_ALPHAS } from "./pixi-edges.js";
 import { createZoomController } from "./pixi-zoom.js";
 
 import { select } from "./dom.js";
@@ -501,7 +501,7 @@ function redrawNodeSelectionRing(strokeGfx, data) {
 
 function redrawEdgeNormal(visGfx, data, points, scale) {
   visGfx.clear();
-  const color = EDGE_COLORS[data.direction] ?? 0x6890b8;
+  const color = getEdgeColor(data);
   const baseAlpha = EDGE_ALPHAS[data.direction] ?? 0.40;
   const isSynthetic = data.direction === "synthetic";
   const s = scale || currentZoomScale;
@@ -2859,7 +2859,7 @@ function buildLegend() {
   edgeSection.className = "legend-section";
   edgeSection.innerHTML = `
     <span class="legend-section-label">Edges</span>
-    <div class="legend-item"><span class="legend-line" style="background: rgba(90,120,160,0.5);"></span>Production</div>
+    <div class="legend-item"><span class="legend-line" style="background: rgba(104,152,192,0.55);"></span>Production</div>
     <div class="legend-item"><span class="legend-line legend-line-construction"></span>Construction</div>
     <div class="legend-item"><span class="legend-line legend-line-upgrade"></span>Upgrade</div>
   `;

@@ -25,7 +25,7 @@ function computeBuildingBand(b) {
  *   building: { id, type:"building", name, category, band, recipes, desc?, storage?, fulfillment?, ... }
  *
  * Edge shape:
- *   { from, to, recipe, amount, direction:"input"|"output"|"construction"|"upgrade" }
+ *   { from, to, recipe, amount, direction:"input"|"output"|"construction"|"upgrade", tier? }
  *
  * @returns {{ nodes: Map<string, import('../types.js').GraphNode & (import('../types.js').Resource | import('../types.js').Building)>, edges: import('../types.js').GraphEdge[] }}
  */
@@ -92,6 +92,7 @@ export function buildGraph() {
             recipe: `Upgrade ${tier + 1}`,
             amount: cost.amount,
             direction: "upgrade",
+            tier: tier + 1,
           });
         }
       }
