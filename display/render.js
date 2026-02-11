@@ -2,6 +2,7 @@
 import { Application, Container, Graphics, Text, Sprite, Assets } from "pixi.js";
 import { buildGraph } from "../derive/graph.js";
 import { computeLayout, COL_SPACING, ROW_SPACING, BAND_GAP } from "../derive/layout.js";
+import { layout as precomputedLayout } from "../data/layout.js";
 import { buildFilterPanel, applyFilters, focusSearch, setResourceState, getResourceState, refreshResourceGrid, fireFilterChange, isShowFiltered, getRecipeWeight, setRecipeWeight, getEdgeMode, setEdgeMode, getVisibleDirections, getFocusMode, setFocusMode, clearFocusMode, setBuildingState, getBuildingState, getAvailableResources, getCities, getActiveCityId, getActiveCityName, createCity, deleteCity, renameCity, switchCity, deactivateCity, importCity } from "./filters.js";
 import { parseSaveFile } from "./save-import.js";
 import { RESOURCE_COLORS, BUILDING_COLORS, RESOURCE_NODE_COLORS, BAND_ORDER, BAND_COLORS, capitalize } from "./config.js";
@@ -3322,10 +3323,9 @@ export async function render(setStatus) {
 
   await yieldToMain();
 
-  // Full layout positions
-  status("Computing layout\u2026");
-  const allEdges = edges.filter(e => e.direction !== "upgrade");
-  fullLayoutPositions = computeLayout(nodes, allEdges, allEdges);
+  // Full layout positions (precomputed at extraction time)
+  status("Loading layout\u2026");
+  fullLayoutPositions = new Map(Object.entries(precomputedLayout));
 
   await yieldToMain();
 
