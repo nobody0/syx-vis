@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0c1014"/>
+      <stop offset="100%" stop-color="#141a20"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#b08420"/>
+      <stop offset="100%" stop-color="#e0aa38"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- Subtle border -->
+  <rect x="24" y="24" width="1152" height="582" rx="8" fill="none" stroke="#3a3a3a" stroke-width="1" opacity="0.5"/>
+
+  <!-- Decorative graph nodes (left side) -->
+  <!-- Resource circles -->
+  <circle cx="120" cy="200" r="18" fill="#5a9eff" opacity="0.5"/>
+  <circle cx="120" cy="280" r="18" fill="#6cd45a" opacity="0.5"/>
+  <circle cx="120" cy="360" r="18" fill="#ffaa44" opacity="0.5"/>
+  <circle cx="120" cy="440" r="18" fill="#ff5555" opacity="0.4"/>
+
+  <!-- Building rects -->
+  <rect x="220" y="230" width="80" height="36" rx="4" fill="#d88848" opacity="0.4"/>
+  <rect x="220" y="310" width="80" height="36" rx="4" fill="#5ab858" opacity="0.4"/>
+  <rect x="220" y="390" width="80" height="36" rx="4" fill="#9870c8" opacity="0.4"/>
+
+  <!-- Edges -->
+  <line x1="138" y1="200" x2="220" y2="248" stroke="#647d9b" stroke-width="1.5" opacity="0.35"/>
+  <line x1="138" y1="280" x2="220" y2="248" stroke="#647d9b" stroke-width="1.5" opacity="0.35"/>
+  <line x1="138" y1="280" x2="220" y2="328" stroke="#647d9b" stroke-width="1.5" opacity="0.35"/>
+  <line x1="138" y1="360" x2="220" y2="328" stroke="#647d9b" stroke-width="1.5" opacity="0.35"/>
+  <line x1="138" y1="360" x2="220" y2="408" stroke="#647d9b" stroke-width="1.5" opacity="0.35"/>
+  <line x1="138" y1="440" x2="220" y2="408" stroke="#647d9b" stroke-width="1.5" opacity="0.35"/>
+
+  <!-- Output circles -->
+  <circle cx="370" cy="248" r="14" fill="#5a9eff" opacity="0.35"/>
+  <circle cx="370" cy="328" r="14" fill="#6cd45a" opacity="0.35"/>
+  <circle cx="370" cy="408" r="14" fill="#ffaa44" opacity="0.35"/>
+
+  <line x1="300" y1="248" x2="356" y2="248" stroke="#647d9b" stroke-width="1.5" opacity="0.3"/>
+  <line x1="300" y1="328" x2="356" y2="328" stroke="#647d9b" stroke-width="1.5" opacity="0.3"/>
+  <line x1="300" y1="408" x2="356" y2="408" stroke="#647d9b" stroke-width="1.5" opacity="0.3"/>
+
+  <!-- Decorative room grid (right side) -->
+  <g transform="translate(880, 180)" opacity="0.35">
+    <!-- Grid cells -->
+    <rect x="0" y="0" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="20" y="0" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="40" y="0" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="60" y="0" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="80" y="0" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="100" y="0" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="120" y="0" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+
+    <rect x="0" y="20" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="20" y="20" width="20" height="20" fill="#9870c8" opacity="0.6" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="40" y="20" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="60" y="20" width="20" height="20" fill="#d88848" opacity="0.5" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="80" y="20" width="20" height="20" fill="#d88848" opacity="0.5" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="100" y="20" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="120" y="20" width="20" height="20" fill="#9870c8" opacity="0.6" stroke="#3a4a5a" stroke-width="0.5"/>
+
+    <rect x="0" y="40" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="20" y="40" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="40" y="40" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="60" y="40" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="80" y="40" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="100" y="40" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="120" y="40" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+
+    <rect x="0" y="60" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="20" y="60" width="20" height="20" fill="#5ab858" opacity="0.5" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="40" y="60" width="20" height="20" fill="#5ab858" opacity="0.5" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="60" y="60" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="80" y="60" width="20" height="20" fill="#5ab858" opacity="0.5" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="100" y="60" width="20" height="20" fill="#5ab858" opacity="0.5" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="120" y="60" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+
+    <rect x="0" y="80" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="20" y="80" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="40" y="80" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="60" y="80" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="80" y="80" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="100" y="80" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+    <rect x="120" y="80" width="20" height="20" fill="#1a2530" stroke="#3a4a5a" stroke-width="0.5"/>
+  </g>
+
+  <!-- Title -->
+  <text x="600" y="260" text-anchor="middle" font-family="Georgia, 'Crimson Pro', serif" font-size="52" font-weight="600" fill="#e2ddd0">
+    Production Chain Atlas
+  </text>
+
+  <!-- Subtitle -->
+  <text x="600" y="310" text-anchor="middle" font-family="'Segoe UI', system-ui, sans-serif" font-size="24" fill="#b0a898">
+    Songs of Syx
+  </text>
+
+  <!-- Divider line -->
+  <line x1="440" y1="340" x2="760" y2="340" stroke="url(#gold)" stroke-width="1.5" opacity="0.6"/>
+
+  <!-- Feature callouts -->
+  <text x="600" y="390" text-anchor="middle" font-family="'Segoe UI', system-ui, sans-serif" font-size="20" fill="#e0aa38">
+    Interactive Production Graph
+  </text>
+  <text x="600" y="425" text-anchor="middle" font-family="'Segoe UI', system-ui, sans-serif" font-size="18" fill="#807568">
+    116 Buildings &middot; 42 Resources &middot; 93 Recipes
+  </text>
+
+  <text x="600" y="475" text-anchor="middle" font-family="'Segoe UI', system-ui, sans-serif" font-size="20" fill="#e0aa38">
+    Room Layout Planner
+  </text>
+  <text x="600" y="510" text-anchor="middle" font-family="'Segoe UI', system-ui, sans-serif" font-size="18" fill="#807568">
+    Auto-Optimizer &middot; Blueprint Import/Export
+  </text>
+
+  <!-- Footer -->
+  <text x="600" y="580" text-anchor="middle" font-family="'Segoe UI', system-ui, sans-serif" font-size="14" fill="#504840">
+    Free community tool &middot; nobody0.github.io/syx-vis
+  </text>
+</svg>

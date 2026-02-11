@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://nobody0.github.io/syx-vis/sitemap.xml

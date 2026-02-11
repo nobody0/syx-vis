@@ -3,13 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Interactive production chain visualizer for Songs of Syx. Explore building recipes, resource flows, population needs, and production balancing.">
-  <meta property="og:title" content="Production Chain Atlas – Songs of Syx">
-  <meta property="og:description" content="Interactive production chain visualizer for Songs of Syx">
+  <meta name="description" content="Free tool for Songs of Syx. Interactive production chain graph showing all 116 buildings and 42 resources. Room planner with auto-optimizer and game blueprint import/export.">
+  <meta name="google-site-verification" content="TStAYRmPF9crOjeHCxcdy5Dy4eXGs_UU_W4Oik9enC8" />
+  <link rel="canonical" href="https://nobody0.github.io/syx-vis/">
+  <meta property="og:title" content="Songs of Syx – Production Graph & Room Planner">
+  <meta property="og:description" content="Free tool for Songs of Syx. Interactive production chain graph showing all 116 buildings and 42 resources. Room planner with auto-optimizer and game blueprint import/export.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://nobody0.github.io/syx-vis/">
+  <meta property="og:image" content="https://nobody0.github.io/syx-vis/og-image.svg">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Songs of Syx – Production Graph & Room Planner">
+  <meta name="twitter:description" content="Free tool for Songs of Syx. Interactive production chain graph showing all 116 buildings and 42 resources. Room planner with auto-optimizer and game blueprint import/export.">
+  <meta name="twitter:image" content="https://nobody0.github.io/syx-vis/og-image.svg">
   <meta name="theme-color" content="#0c1014">
-  <title>Production Chain Atlas – Songs of Syx</title>
+  <title>Songs of Syx Production Graph & Room Planner – Free Tool</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -29,11 +36,26 @@
     }
   }
   </script>
+
+  <!-- Structured data for search engines -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebApplication",
+    "name": "Production Chain Atlas – Songs of Syx",
+    "description": "Free interactive production chain graph and room layout planner for Songs of Syx",
+    "url": "https://nobody0.github.io/syx-vis/",
+    "applicationCategory": "GameApplication",
+    "operatingSystem": "Web browser",
+    "offers": { "@type": "Offer", "price": "0" },
+    "about": { "@type": "VideoGame", "name": "Songs of Syx" }
+  }
+  </script>
 </head>
 <body>
   <div id="header-bar" class="ui-panel">
     <div id="header-title">
-      <h1>Production Chain Atlas</h1>
+      <h1>Production Chain Atlas<span class="sr-only"> – Songs of Syx Room Planner & Production Graph</span></h1>
       <span class="subtitle">A community tool for Songs of Syx</span>
     </div>
     <div class="header-sep"></div>
@@ -63,12 +85,155 @@
     <div id="legend" class="ui-panel"></div>
 
     <div id="stats-bar" class="ui-panel"></div>
+    <div class="seo-content">
+      <h2>Songs of Syx Interactive Production Chain Graph</h2>
+      <p>Visual map of all 116 buildings and 42 resources connected through 93 recipes.
+         Search nodes, filter by category, switch between production/construction/upgrade edge modes,
+         and track your settlement's progress with City Mode.</p>
+    </div>
   </div>
 
-  <div id="view-population" class="view"></div>
-  <div id="view-upkeep" class="view"></div>
-  <div id="view-balancing" class="view"></div>
-  <div id="view-planner" class="view"></div>
+  <div id="view-population" class="view">
+    <div class="seo-content">
+      <h2>Songs of Syx Population Needs Calculator</h2>
+      <p>Per-capita consumption rates for all species. Equipment wear rates, need fulfillment rates,
+         food and drink preferences by species, and military supply requirements — extracted from game data.</p>
+    </div>
+  </div>
+  <div id="view-upkeep" class="view">
+    <div class="seo-content">
+      <h2>Songs of Syx Building Upkeep Costs</h2>
+      <p>Buildings with value degradation require construction materials for maintenance.
+         View annual upkeep costs calculated from construction cost and degrade rate.</p>
+    </div>
+  </div>
+  <div id="view-balancing" class="view">
+    <div class="seo-content">
+      <h2>Songs of Syx Production Balancing Calculator</h2>
+      <p>Calculate workers and buildings needed to produce a target resource at a given rate.
+         Traces the full upstream production chain with per-worker-per-day rates from game data.</p>
+    </div>
+  </div>
+  <div id="view-planner" class="view">
+    <div class="seo-content">
+      <h2>Songs of Syx Room Layout Planner</h2>
+      <p>Design and optimize room layouts for any of the 116 buildings. Draw room shapes, place furniture
+         from the palette, or auto-optimize for maximum efficiency. Import and export blueprints
+         compatible with the game's SavedPrints system — plan in the browser, paste into Songs of Syx.</p>
+    </div>
+  </div>
+
+  <!-- Static help content — crawlable by search engines, read by help.js at runtime -->
+  <div id="help-graph" class="help-content" hidden>
+    <div class="help-description">
+      Explore the full production chain of Songs of Syx &mdash; see what every building needs and produces at a glance.
+    </div>
+    <div class="help-description" style="margin-top:12px">
+      <strong>The Layout</strong><br>
+      The graph reads left to right: basic resources and extraction on the left, advanced production on the right.
+      Rows are grouped into bands &mdash; materials at the top, civilian and services in the middle, military at the bottom.
+      Basic resources and extraction buildings appear on the left, advanced production chains on the right.
+    </div>
+    <div class="help-getting-started" style="margin-top:14px">
+      <div class="help-section-label">Getting Started</div>
+      <table class="shortcut-table">
+        <tr>
+          <td style="width:1%;padding-right:12px"><span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#5a9eff;box-shadow:0 0 3px rgba(0,0,0,0.4);vertical-align:middle"></span></td>
+          <td><strong style="color:var(--text-primary)">Circle = Resource</strong> (colored by category: material, food, drink, military)</td>
+        </tr>
+        <tr>
+          <td><span style="display:inline-block;width:14px;height:10px;border-radius:2px;background:#d88848;box-shadow:0 0 3px rgba(0,0,0,0.4);vertical-align:middle"></span></td>
+          <td><strong style="color:var(--text-primary)">Rectangle = Building</strong> (colored by category: extraction, crafting, service, ...)</td>
+        </tr>
+        <tr><td></td><td>Click a node to see details, recipes, and supply chain</td></tr>
+        <tr><td></td><td>Hover an edge to see per-worker-per-day rates</td></tr>
+      </table>
+    </div>
+    <div class="help-section-label" style="margin-top:16px">Edge Modes</div>
+    <table class="shortcut-table">
+      <tr><td class="shortcut-key"><kbd>1</kbd></td><td>Production &mdash; resource input/output flows</td></tr>
+      <tr><td class="shortcut-key"><kbd>2</kbd></td><td>Construction &mdash; building material costs</td></tr>
+      <tr><td class="shortcut-key"><kbd>3</kbd></td><td>Upgrade &mdash; upgrade material costs</td></tr>
+      <tr><td class="shortcut-key"><kbd>4</kbd></td><td>All &mdash; every edge type at once</td></tr>
+    </table>
+    <div class="help-description" style="margin-top:14px">
+      <strong>City Mode</strong><br>
+      Track your settlement's production chain. Click a building and mark it <strong>Built</strong> &mdash; its recipe outputs gain a green ring showing they're available.
+      Click a resource and mark it <strong>Bought</strong> to hide its upstream producers (you're importing it via trade).
+      Use the city selector in the header to manage multiple settlement profiles.
+    </div>
+    <div class="help-section-label" style="margin-top:16px">Shortcuts</div>
+    <table class="shortcut-table">
+      <tr><td class="shortcut-key"><kbd>Ctrl+F</kbd></td><td>Search nodes</td></tr>
+      <tr><td class="shortcut-key"><kbd>F</kbd></td><td>Focus on selected node</td></tr>
+      <tr><td class="shortcut-key"><kbd>Esc</kbd></td><td>Exit focus / deselect</td></tr>
+      <tr><td class="shortcut-key"><kbd>Alt+1</kbd>&ndash;<kbd>5</kbd></td><td>Switch tabs</td></tr>
+      <tr><td class="shortcut-key"><kbd>?</kbd></td><td>This help</td></tr>
+    </table>
+  </div>
+
+  <div id="help-population" class="help-content" hidden>
+    <div class="help-description">
+      Per-capita consumption rates and species data extracted from game files. Shows equipment wear rates,
+      need fulfillment, food/drink preferences by species, and military supply overrides.
+      Still a work in progress &mdash; more features coming.
+    </div>
+  </div>
+
+  <div id="help-upkeep" class="help-content" hidden>
+    <div class="help-description">
+      Buildings with value degradation consume construction materials over time to maintain their value.
+      Shows annual maintenance costs (construction cost &times; degrade rate).
+      Still a work in progress &mdash; more features coming.
+    </div>
+  </div>
+
+  <div id="help-balancing" class="help-content" hidden>
+    <div class="help-description">
+      Calculate how many workers and buildings you need to produce a target resource at a given rate.
+      Traces the full upstream chain and respects recipe weights from the Graph tab's filter panel.
+      Still a work in progress &mdash; more features coming.
+    </div>
+  </div>
+
+  <div id="help-planner" class="help-content" hidden>
+    <div class="help-description">
+      Design and optimize room layouts for any building. Select a building from the dropdown,
+      draw the room shape, then place furniture from the palette.
+    </div>
+    <div class="help-section-label" style="margin-top:14px">Controls</div>
+    <table class="shortcut-table">
+      <tr><td class="shortcut-key"><kbd>D</kbd></td><td>Draw room tiles</td></tr>
+      <tr><td class="shortcut-key"><kbd>E</kbd></td><td>Erase room tiles</td></tr>
+      <tr><td class="shortcut-key"><kbd>W</kbd></td><td>Toggle door placement</td></tr>
+      <tr><td class="shortcut-key"><kbd>R</kbd></td><td>Rotate furniture</td></tr>
+      <tr><td class="shortcut-key"><kbd>V</kbd></td><td>Toggle sprite view</td></tr>
+      <tr><td class="shortcut-key"><kbd>Ctrl+Z</kbd></td><td>Undo</td></tr>
+    </table>
+    <div class="help-section-label" style="margin-top:14px">Mouse</div>
+    <table class="shortcut-table">
+      <tr><td class="shortcut-key">Click</td><td>Place furniture / paint tiles</td></tr>
+      <tr><td class="shortcut-key">Shift+Click</td><td>Remove furniture</td></tr>
+      <tr><td class="shortcut-key">Ctrl+Click</td><td>Copy furniture under cursor</td></tr>
+      <tr><td class="shortcut-key">Drag</td><td>Move placed furniture</td></tr>
+    </table>
+    <div class="help-description" style="margin-top:14px">
+      <strong>Auto-Optimize</strong><br>
+      Fills the room with furniture to maximize stats (employees, services, efficiency).
+      Draw or import a room shape, then click <strong>Auto-Optimize</strong>. The result is undoable with Ctrl+Z.
+    </div>
+    <div class="help-description" style="margin-top:10px">
+      <strong>Sharing</strong><br>
+      <strong>Copy Link</strong> generates a shareable URL encoding the full room &mdash; building, shape, doors, and furniture.
+      Anyone with the link sees your exact layout.
+    </div>
+    <div class="help-description" style="margin-top:10px">
+      <strong>Blueprints</strong><br>
+      <strong>Save</strong> stores layouts in your browser. The blueprint manager can <strong>import</strong> from
+      the game's <code>SavedPrints.txt</code> and <strong>export</strong> back to game format &mdash; design here,
+      use in Songs of Syx.
+    </div>
+  </div>
 
   <!--
     ES Modules require an HTTP server — file:// will block imports due to CORS.

@@ -3322,6 +3322,10 @@ export async function render() {
   const initial = applyFilters(fullNodes, fullEdges);
   updateGraph(initial.nodes, initial.edges, initial.layoutEdges, initial.filteredOutNodes, initial.filteredOutEdges);
 
+  // Remove SEO placeholder now that graph is rendered
+  const seoDiv = document.querySelector("#view-graph .seo-content");
+  if (seoDiv) seoDiv.remove();
+
   // Reveal — graph is fully built and zoom-to-fit already applied
   app.stage.visible = true;
   app.ticker.start();
