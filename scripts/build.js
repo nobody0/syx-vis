@@ -21,7 +21,7 @@ await build({
   format: "esm",
   minify: true,
   outdir: dist,
-  entryNames: "[name]",
+  entryNames: "[name]-[hash]",
   chunkNames: "chunks/[name]-[hash]",
   target: ["es2022"],
   // Redirect pixi.js → slim entry that skips unused subsystems (accessibility,
@@ -39,23 +39,28 @@ cpSync(join(root, "data/sprites"), join(dist, "data/sprites"), { recursive: true
 cpSync(join(root, "favicon.svg"), join(dist, "favicon.svg"));
 cpSync(join(root, "og-image.svg"), join(dist, "og-image.svg"));
 
+// Minify CSS with content hash
+console.log("Minifying CSS...");
+const css = readFileSync(join(root, "display/style.css"), "utf8");
+const { code: minCss } = await transform(css, { loader: "css", minify: true });
+const cssHash = (await import("crypto")).createHash("md5").update(minCss).digest("hex").slice(0, 8);
+const cssName = `style-${cssHash}.css`;
+writeFileSync(join(dist, cssName), minCss);
+
+// Find the hashed JS entry point filename
+const jsEntry = readdirSync(dist).find(f => f.startsWith("main-") && f.endsWith(".js"));
+
 // Process index.html — update paths for bundled output
 console.log("Processing index.html...");
 let html = readFileSync(join(root, "index.html"), "utf8");
 
-// Replace display/style.css → style.css
-html = html.replace('href="display/style.css"', 'href="style.css"');
+// Replace display/style.css → hashed CSS
+html = html.replace('href="display/style.css"', `href="${cssName}"`);
 
-// Replace display/main.js → main.js
-html = html.replace('src="display/main.js"', 'src="main.js"');
+// Replace display/main.js → hashed JS
+html = html.replace('src="display/main.js"', `src="${jsEntry}"`);
 
 writeFileSync(join(dist, "index.html"), html);
-
-// Minify CSS
-console.log("Minifying CSS...");
-const css = readFileSync(join(root, "display/style.css"), "utf8");
-const { code: minCss } = await transform(css, { loader: "css", minify: true });
-writeFileSync(join(dist, "style.css"), minCss);
 
 // Size report
 function dirSize(dir) {
