@@ -5,7 +5,7 @@
 
 :root {
   /* Fonts — system stack (no external font loading) */
-  --font-display: "Georgia", serif;
+  --font-display: "Palatino Linotype", "Palatino", "Georgia", serif;
   --font-body: "Segoe UI", system-ui, sans-serif;
   --font-mono: "Consolas", monospace;
 
